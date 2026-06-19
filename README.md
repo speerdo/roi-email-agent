@@ -88,14 +88,14 @@ npm test:watch       # vitest watch
 
 ### 5. Database
 
-Drizzle schema lives in `db/schema.ts`. Push the schema to Neon:
+Drizzle schema lives in `db/schema.ts`. Apply to Neon:
 
 ```bash
-npm run db:push      # quick push (good for dev)
-# or
-npm run db:generate  # emit a migration file under drizzle/
-# then apply via drizzle-kit migrate
-npm run db:studio    # drizzle-kit studio (inspect the DB)
+npm run db:generate  # emit a migration SQL file under drizzle/
+npm run db:migrate   # apply migrations to Neon
+npm run db:smoke     # round-trip insert/select/delete on both tables
+npm run db:studio    # drizzle-kit studio (inspect the DB in a browser)
+npm run db:push      # quick schema push (good for iterating, no migration file)
 ```
 
 ### 6. Deploy
@@ -132,14 +132,16 @@ api/           serverless endpoints
   poll.ts      cron target: fetch + classify + DB + post card
   discord.ts   interaction handler: approve/edit/reject
 lib/           shared logic
+  db.ts        singleton Drizzle client over @neondatabase/serverless
   mail/        IMAP, body cleaning, pre-filter matcher
   gemini/      Gemini client + prompt
   discord/     REST helpers, signature verification
   poll/        per-message runner (incremental + backlog)
   smtp.ts      outbound reply sender
 db/            Drizzle schema
+  schema.ts    email_queue + email_sync_state
 drizzle/       generated migrations
-scripts/       one-shot utilities (preflight, smoke tests)
+scripts/       one-shot utilities (preflight, db-smoke)
 types/         env types + helpers
 docs/          implementation plan + action plan
 ```

@@ -58,7 +58,7 @@ re-architecture of assumptions.
 
 Tasks:
 
-- [ ] `scripts/preflight.ts` (committed under `scripts/`, runnable via
+- [x] `scripts/preflight.ts` (committed under `scripts/`, runnable via
       `tsx scripts/preflight.ts`) that, in order, exercises:
       1. **Env presence** — `getEnv()` asserts every required key is set and
          non-empty. Lists any missing. (Discord vars are allowed-missing at
@@ -77,10 +77,10 @@ Tasks:
       5. **Gemini** — `@google/genai` call with `GEMINI_API_KEY`, send a
          trivial "reply with the single word OK" prompt to `GEMINI_MODEL`,
          print the response. Confirms key + model id.
-- [ ] Run the preflight locally. Resolve any failures (often a typo,
+- [x] Run the preflight locally. Resolve any failures (often a typo,
       a wrong pooled-vs-direct Neon host, or the channel_binding issue
       above) before proceeding.
-- [ ] `README.md` snippet documenting how to re-run preflight after any
+- [x] `README.md` snippet documenting how to re-run preflight after any
       credential rotation.
 
 **Review:** Adam sees green output for Neon / IMAP / SMTP / Gemini. Any
@@ -96,7 +96,7 @@ Vercel, with the cron decision from above resolved.
 
 Tasks:
 
-- [ ] `package.json` — `type: module`, `private: true`. Scripts:
+- [x] `package.json` — `type: module`, `private: true`. Scripts:
       `dev` (vercel dev), `build` (tsc --noEmit), `typecheck` (tsc --noEmit),
       `lint` (eslint), `test` (vitest run), `test:watch`, `db:push`
       (drizzle-kit push), `db:studio` (drizzle-kit studio).
@@ -108,34 +108,34 @@ Tasks:
       `@types/node`, `@types/nodemailer`, `@types/imapflow`,
       `@types/mailparser`, `eslint`, `@typescript-eslint/eslint-plugin`,
       `@typescript-eslint/parser`, `typescript-eslint`.
-- [ ] `tsconfig.json` — strict, ESM, `target: ES2022`,
+- [x] `tsconfig.json` — strict, ESM, `target: ES2022`,
       `module: NodeNext`, `moduleResolution: NodeNext`,
       `resolveJsonModule`, `skipLibCheck`, `noUncheckedIndexedAccess`.
       `include` covers `api/`, `lib/`, `db/`, `scripts/`, `types/`.
-- [ ] `vercel.json` (Adam is on Vercel Pro, so sub-hourly cron + 60s
+- [x] `vercel.json` (Adam is on Vercel Pro, so sub-hourly cron + 60s
       `maxDuration` are supported):
       `{ "crons": [{ "path": "/api/poll", "schedule": "*/10 * * * *" }] }`,
       `functions.api/*.maxDuration` ~60. `"cleanUrls": true`.
-- [ ] `eslint.config.js` (flat) — `typescript-eslint` strict,
+- [x] `eslint.config.js` (flat) — `typescript-eslint` strict,
       `no-unused-vars` as error, `no-throw-literal`, explicit `any` warn.
       Ignores `.vercel/`, `dist/`, `drizzle/` generated output.
-- [ ] `vitest.config.ts` — node environment, `include: ['**/*.test.ts']`.
-- [ ] Directory skeleton: `api/`, `lib/`, `lib/mail/`, `lib/discord/`,
+- [x] `vitest.config.ts` — node environment, `include: ['**/*.test.ts']`.
+- [x] Directory skeleton: `api/`, `lib/`, `lib/mail/`, `lib/discord/`,
       `lib/poll/`, `lib/gemini/`, `db/`, `drizzle/`, `types/`, `scripts/`.
-- [ ] `types/env.ts` — `Env` interface mirroring the `.env.example` keys
+- [x] `types/env.ts` — `Env` interface mirroring the `.env.example` keys
       with types (numbers for ports, booleans for `*_MARK_READ`). A
       `getEnv()` helper that reads once at cold start, coerces types,
       throws with a clear message on any missing required key. Discord
       vars are optional here; they're asserted explicitly at the top of
       Phase 6 endpoints.
-- [ ] Placeholder endpoints so Vercel builds:
+- [x] Placeholder endpoints so Vercel builds:
       - `api/poll.ts` — returns `{ status: 'not implemented' }` 501.
       - `api/discord.ts` — returns `{ status: 'not implemented' }` 501.
-- [ ] `README.md` — purpose, env setup (point at `.env.example`),
+- [x] `README.md` — purpose, env setup (point at `.env.example`),
       preflight instructions (run `tsx scripts/preflight.ts`),
       dev/deploy commands, the cron decision (Pro vs external scheduler),
       link to both docs.
-- [ ] Confirm all of: `npm install`, `npm run typecheck`, `npm run lint`,
+- [x] Confirm all of: `npm install`, `npm run typecheck`, `npm run lint`,
       `npm test` (0 tests, green), and `npm run dev` → `curl localhost:3000/api/poll`
       returns the 501 placeholder.
 
@@ -158,7 +158,7 @@ during Phase 7. The `.env.example` template keeps the "clean" form.**
 
 Tasks:
 
-- [ ] `db/schema.ts` — Drizzle definitions for both tables (plan section 6).
+- [x] `db/schema.ts` — Drizzle definitions for both tables (plan section 6).
       Columns, defaults, and indexes match the plan SQL exactly. Use
       `text` for category/status (not pg enums — easier to extend per the
       plan's v2 multi-domain posture).
@@ -174,23 +174,23 @@ Tasks:
       - `email_sync_state`: mailbox (text primary key), last_uid (integer
         default 0), updated_at (timestamptz default now()).
       - Indexes on `email_queue(status)` and `email_queue(received_at)`.
-- [ ] `drizzle.config.ts` pointing `url` at `process.env.DATABASE_URL`,
+- [x] `drizzle.config.ts` pointing `url` at `process.env.DATABASE_URL`,
       `dialect: 'postgresql'`, schema `./db/schema.ts`, out `./drizzle`.
-- [ ] `lib/db.ts` — singleton: `neon(process.env.DATABASE_URL!)` ->
+- [x] `lib/db.ts` — singleton: `neon(process.env.DATABASE_URL!)` ->
       `drizzle(client, { schema })`. Export the `db` object plus a
       `closeDb()` no-op (HTTP driver is connectionless; documented so no
       one tries to pool it later).
-- [ ] **Migration approach:** use `drizzle-kit generate` to produce a SQL
+- [x] **Migration approach:** use `drizzle-kit generate` to produce a SQL
       migration file under `drizzle/` (committed to git — gives us
       history), then `drizzle-kit migrate` to apply. Rationale: costs
       nothing over `push` and we get a reviewable diff for a production
       DB. (`push` is the fallback if `migrate` misbehaves.)
-- [ ] Run `npm run db:push` as a fallback / quick check; primary path is
+- [x] Run `npm run db:push` as a fallback / quick check; primary path is
       generate + migrate.
-- [ ] Smoke test: `scripts/db-smoke.ts` (tsx-runnable) inserts one row
+- [x] Smoke test: `scripts/db-smoke.ts` (tsx-runnable) inserts one row
       in each table, selects it back, deletes it. Prints rows-touched.
       Not run on every CI — manual Phase-2 verification only.
-- [ ] Update `.env.example` if the `DATABASE_URL` form was changed during
+- [x] Update `.env.example` if the `DATABASE_URL` form was changed during
       preflight (remove `&channel_binding=require` if it broke
       `@neondatabase/serverless`).
 
