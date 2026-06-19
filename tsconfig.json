@@ -14,5 +14,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["types/**/*.ts", "lib/**/*.ts", "api/**/*.ts", "db/**/*.ts", "scripts/**/*.ts"]
+  "include": ["types/**/*.ts", "lib/**/*.ts", "api/**/*.ts", "db/**/*.ts", "scripts/**/*.ts"],
+  "exclude": ["node_modules", ".vercel", "dist", "drizzle"]
 }

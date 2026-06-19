@@ -16,14 +16,6 @@ function record(r: StepResult) {
   console.log(`[${mark}] ${r.name}: ${r.detail}`);
 }
 
-function assertEnv(key: string, opts: { allowEmpty?: boolean } = {}): string {
-  const v = process.env[key];
-  if (v === undefined || (v === '' && !opts.allowEmpty)) {
-    throw new Error(`missing env var ${key}`);
-  }
-  return v;
-}
-
 async function checkEnvPresence() {
   const required = [
     'EMAIL_IMAP_HOST', 'EMAIL_IMAP_PORT', 'EMAIL_SMTP_HOST', 'EMAIL_SMTP_PORT',
@@ -111,7 +103,7 @@ async function checkImap() {
   } catch (err) {
     const e = err as Error;
     record({ name: 'imap', ok: false, detail: e.message });
-    try { await client.logout().catch(() => {}); } catch { /* noop */ }
+    await client.logout().catch(() => { /* best-effort cleanup */ });
   }
 }
 
