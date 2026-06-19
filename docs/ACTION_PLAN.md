@@ -34,24 +34,18 @@ Conventions:
 
 Only the Discord app is unprovisioned. Adam will create it before Phase 6
 starts — that phase is the first that actually needs those credentials.
+Adam is already on Vercel Pro, so the sub-hourly cron is supported.
 
 ---
 
 ## Open deployment decision to settle in Phase 1 (can block design)
 
->>> **Vercel cron schedule limitation.** Vercel **Hobby** tier allows only
->>> **1 cron job, daily minimum** — `*/10 * * * *` is NOT supported on Hobby.
->>> Options:
->>>   (a) Upgrade the Vercel project to **Pro** (~$20/mo) — supports
->>>       sub-hourly crons, longer `maxDuration`, more builds.
->>>   (b) Stay on Hobby, drop `vercel.json` cron, and drive `/api/poll`
->>>       from an **external scheduler** (cron-job.org, GitHub Actions,
->>>       Make.com, Adam's box) hitting the `CRON_SECRET`-guarded
->>>       endpoint every 10 min.
->>> Adam picks before Phase 1 commits. Default recommendation: **(a) Pro**,
->>> since the whole design assumes 10-min polling and Pro also raises the
->>> function timeout (helps backlog runs in Phase 8). Documented in README
->>> either way.
+>>> **Vercel tier:** Adam is already on **Vercel Pro**. The
+>>> `*/10 * * * *` sub-hourly cron in `vercel.json` is supported out of
+>>> the box, and `maxDuration: 60` per function is within the Pro
+>>> ceiling. No external scheduler fallback is needed. (Hobby-only
+>>> note kept below as a historical footnote for anyone forking this
+>>> repo: Hobby allows 1 cron job at daily minimum only.)
 
 ---
 
@@ -118,16 +112,10 @@ Tasks:
       `module: NodeNext`, `moduleResolution: NodeNext`,
       `resolveJsonModule`, `skipLibCheck`, `noUncheckedIndexedAccess`.
       `include` covers `api/`, `lib/`, `db/`, `scripts/`, `types/`.
-- [ ] `vercel.json`:
-      - If Adam chose **Pro**: include
-        `{ "crons": [{ "path": "/api/poll", "schedule": "*/10 * * * *" }] }`
-        and set `functions.api/*.maxDuration` to ~60 (Pro ceiling).
-      - If Adam chose **Hobby + external scheduler**: omit the `crons`
-        block entirely; document the external-scheduler pattern in
-        README. Function `maxDuration` stays at the Hobby ceiling (10s
-        on 2024 defaults — verify and bound backlog batch accordingly).
-      In both cases: `"cleanUrls": true`, functions express runtime
-      `@vercel/node` so `.ts` is built.
+- [ ] `vercel.json` (Adam is on Vercel Pro, so sub-hourly cron + 60s
+      `maxDuration` are supported):
+      `{ "crons": [{ "path": "/api/poll", "schedule": "*/10 * * * *" }] }`,
+      `functions.api/*.maxDuration` ~60. `"cleanUrls": true`.
 - [ ] `eslint.config.js` (flat) — `typescript-eslint` strict,
       `no-unused-vars` as error, `no-throw-literal`, explicit `any` warn.
       Ignores `.vercel/`, `dist/`, `drizzle/` generated output.
@@ -728,8 +716,9 @@ all are green before v1 ship:
 
 Carried from plan section 15, with the phase they get answered in:
 
-1. **Vercel cron tier (Pro vs Hobby + external scheduler).** Decided in
-   Phase 1. Default recommendation: Pro.
+1. **Vercel cron tier.** Resolved: Adam is on **Vercel Pro**, so the
+   `*/10 * * * *` cron in `vercel.json` works natively and `maxDuration:
+   60` is within the Pro ceiling. No external-scheduler fallback needed.
 2. **Current Gemini model IDs + pricing at build time.** Confirmed in
    Phase 4 (using `gemini-2.5-flash` for both classify and draft;
    flash-lite swap evaluated in Phase 9).
