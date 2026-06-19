@@ -339,7 +339,7 @@ No Discord cards yet — those wire in Phase 6 after Adam provisions Discord.
 
 Tasks:
 
-- [ ] `api/poll.ts`:
+- [x] `api/poll.ts`:
   - **Auth:** verify `CRON_SECRET` from the `Authorization: Bearer
     <secret>` **header only**. Do NOT accept `?secret=` — query strings
     are logged by Vercel and would leak the secret. 401 on mismatch.
@@ -379,11 +379,11 @@ Tasks:
     the cursor).
   - **Return:** the `RunSummary` JSON (counts by category, by
     skip_reason, errors, duration, lastUidBefore/After).
-- [ ] `lib/poll/runner.ts` — extract the per-message loop so the backlog
+- [x] `lib/poll/runner.ts` — extract the per-message loop so the backlog
       modes (Phase 8) can reuse it without duplicating logic. Takes a
       "fetch iterable" + a "routing policy" so incremental vs backlog
       differ only in those two params.
-- [ ] Local smoke test: `vercel dev`, then
+- [x] Local smoke test: `vercel dev`, then
       `curl -H "Authorization: Bearer $CRON_SECRET" localhost:3000/api/poll`.
       Confirm: connects to IMAP, classifies at least one real message,
       writes a row, advances `last_uid`, returns a sensible summary.
