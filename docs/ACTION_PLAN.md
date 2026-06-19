@@ -208,10 +208,10 @@ any LLM call. No Gemini, no Discord, no DB writes yet (other than logging).
 
 Tasks:
 
-- [ ] `lib/env.ts` — finalize the `getEnv()` helper from Phase 1; add
+- [x] `lib/env.ts` — finalize the `getEnv()` helper from Phase 1; add
       helpers for comma-split env lists (`getCommaList('DMARC_SUBJECTS')`)
       and booleans (`getBool('AUTOMATED_FORM_MARK_READ')`).
-- [ ] `lib/imap.ts`:
+- [x] `lib/imap.ts`:
       - `connectImap()` — opens an `ImapFlow` instance against
         `EMAIL_IMAP_HOST:EMAIL_IMAP_PORT`, auth `EMAIL_USER/EMAIL_PASS`,
         TLS. Logger wired to the shared logging helper.
@@ -226,14 +226,14 @@ Tasks:
       - `appendSent(rawMessage)` — Phase 9 stub; logs "not implemented"
         for now so Phase 4's SMTP path can call it without branching.
       - All operations wrapped in try/finally that closes the connection.
-- [ ] `lib/mail/clean.ts`:
+- [x] `lib/mail/clean.ts`:
       - `cleanBody(raw)` — strip signature blocks (`-- `, `Best regards,`
         etc.), strip quoted reply history (`> `-prefixed lines,
         `On <date> ... wrote:` blocks), collapse whitespace, truncate to
         ~2000 chars at a word boundary.
       - `parseFromHeader(raw)` -> `{address, name}` used by pre-filter
         sender matching.
-- [ ] `lib/mail/prefilter.ts` — implements plan section 7a:
+- [x] `lib/mail/prefilter.ts` — implements plan section 7a:
       - `matchRecyclingRequest(subject, from)` — BOTH an
         `AUTOMATED_FORM_SUBJECTS` prefix match (case-insensitive
         `startsWith` on any entry) AND `AUTOMATED_FORM_FROM` substring
@@ -249,11 +249,11 @@ Tasks:
         dmarc. Only the FIRST match wins.
       - Comma-separated lists parsed once at module load (cached).
       - Case-insensitive throughout.
-- [ ] `lib/logging.ts`:
+- [x] `lib/logging.ts`:
       - `RunSummary` builder: counters by category, by skip_reason,
         errors[], processed count, lastUidBefore/After, durationMs.
       - `toJSON()` and `toDiscordLine()` (used by Phase 5/8).
-- [ ] `lib/mail/prefilter.test.ts` and `lib/mail/clean.test.ts` (vitest)
+- [x] `lib/mail/prefilter.test.ts` and `lib/mail/clean.test.ts` (vitest)
       covering every section-14 checklist row that's testable without
       IMAP/LLM:
       - Recycling request happy path: web3forms sender + recycling
@@ -644,9 +644,9 @@ Tasks:
 - [ ] **Sent folder mirror:** implement `appendSent()` in `lib/imap.ts`
       — append the sent raw message to the IMAP `Sent` folder via
       `imapflow`'s `append` operation so outbound replies show in
-      webmail. First confirm PrivateEmail exposes a `Sent` folder via
-      IMAP (Phase 0's preflight listed mailboxes — re-check the name;
-      PrivateEmail often uses `Sent` but sometimes `Sent Items`).
+      webmail. **Confirmed in Phase 0 preflight**: the folder is named
+      `Sent` on PrivateEmail (listed alongside `INBOX`, `Drafts`, `Spam`,
+      `Trash`).
 - [ ] **Batch size bounding + timeout safety:** explicit `BATCH_LIMIT`
       env (default 25) enforced in both incremental and backlog paths.
       Track accumulated processing time in the runner; stop and return
