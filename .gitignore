@@ -1,1 +1,18 @@
-# nothing here yet
+# env
+.env
+.env.local
+.env.*.local
+
+# deps
+node_modules/
+
+# build
+.vercel/
+dist/
+
+# logs
+*.log
+npm-debug.log*
+
+# os
+.DS_Store
