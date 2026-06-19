@@ -279,13 +279,13 @@ Goal: the LLM and the outbound email path are ready, with NO endpoints yet.
 
 Tasks:
 
-- [ ] `lib/gemini/prompt.ts` — exports the system prompt as a constant
+- [x] `lib/gemini/prompt.ts` — exports the system prompt as a constant
       matching plan section 9 verbatim (About RecycleOldTech, routing
       rules, reply-worthy/not-reply-worthy categories, JSON schema,
       reference examples, "no em dashes" voice rule, sign-off as
       RecycleOldTech / Adam). Build the user-content string from
       `{from, subject, snippet}` with a small `buildPrompt(msg)` helper.
-- [ ] `lib/gemini/index.ts` — single client using `@google/genai`:
+- [x] `lib/gemini/index.ts` — single client using `@google/genai`:
       - `classifyAndDraft({from, subject, snippet})` ->
         `Promise<ClassifyResult>` matching the JSON shape from section 9.
       - Configures `responseMimeType: 'application/json'` if supported
@@ -299,7 +299,7 @@ Tasks:
         draft with `GEMINI_MODEL`) is a one-line change. Stub a
         `draftOnly({from, subject, snippet, category})` function
         signature that Phase 9 fills in.
-- [ ] `lib/smtp.ts`:
+- [x] `lib/smtp.ts`:
       - `sendReply({to, subject, text, inReplyTo, references})` using
         `nodemailer` SMTP transport against PrivateEmail,
         `from: '"RecycleOldTech" <EMAIL_USER>'`, `inReplyTo` + `references`
@@ -310,7 +310,7 @@ Tasks:
         nice-to-have, wired in now so Phase 9 just fills in the body.
       - Transport created per-invocation (serverless-friendly — no
         shared pool that dies between cold starts).
-- [ ] `scripts/test-gemini.ts` — runnable via `tsx`, takes a hard-coded
+- [x] `scripts/test-gemini.ts` — runnable via `tsx`, takes a hard-coded
       fake email input (override via `--from`, `--subject`, `--body` if
       simple arg parsing is trivial), prints the parsed `classifyAndDraft`
       output. Includes three canned inputs matching plan section 14:
@@ -318,7 +318,7 @@ Tasks:
       2. "Do you buy used laptops?" out-of-scope.
       3. A cold "boost your SEO traffic" sales pitch.
       Adam can edit and re-run for ad-hoc cases.
-- [ ] `scripts/test-smtp.ts` — guarded: refuses to run without
+- [x] `scripts/test-smtp.ts` — guarded: refuses to run without
       `--to <real-address>` and prints a confirmation prompt before
       sending. Only run on Adam's explicit go-ahead.
 

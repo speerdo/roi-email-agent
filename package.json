@@ -16,7 +16,9 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "db:smoke": "tsx scripts/db-smoke.ts",
-    "imap:inspect": "tsx scripts/imap-inspect.ts"
+    "imap:inspect": "tsx scripts/imap-inspect.ts",
+    "test:gemini": "tsx scripts/test-gemini.ts",
+    "test:smtp": "tsx scripts/test-smtp.ts"
   },
   "dependencies": {
     "@google/genai": "^2.9.0",
