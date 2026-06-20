@@ -17,6 +17,16 @@ import { postCard } from '../lib/discord/rest.js';
 import { toJSON } from '../lib/logging.js';
 
 /**
+ * Cap on messages fetched per cron tick. Cron fires every 10 minutes (see
+ * vercel.json), so a smaller batch just means backlog drains over more
+ * ticks rather than risking the function's maxDuration. Live testing
+ * during Phase 5 review showed Gemini-bound per-message cost plus IMAP
+ * round-trips can push a 25-message batch well past 60s — see
+ * `maxDuration` in vercel.json, raised alongside this for headroom.
+ */
+const POLL_BATCH_LIMIT = 10;
+
+/**
  * Per-plan §5, the incremental poller's mailbox key is
  * `${EMAIL_USER}/INBOX`. Backlog modes (Phase 8) reuse this convention.
  */
@@ -121,37 +131,44 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // 2. Fetch + process. We hold one IMAP connection for the whole batch;
   // markSeen re-enters its own read/write lock per call so it can flip
   // flags without a separate connection.
+  //
+  // runBatch mutates summary.highestPersistedUid as each message lands, so
+  // it holds the right value to advance the cursor to even if the batch
+  // throws partway through (e.g. the IMAP connection drops on message 20
+  // of 25) — without this, a mid-batch failure would silently discard
+  // already-persisted progress and leave last_uid stuck, forcing every
+  // later run to re-walk the same already-handled messages via dedupe.
   try {
     await withImap(async (client) => {
       // The runner needs an open client it can pass to markSeen for
       // pre-filter matches and (Phase 6) Approve/Reject. fetchSinceUid
       // takes a mailbox arg, so we don't pre-acquire a lock here.
-      const iter = fetchSinceUid(client, mailbox, lastUidBefore, { limit: 25 });
-      const { highestPersistedUid } = await runBatch(
-        iter,
-        client,
-        mailbox,
-        incrementalPolicy,
-        summary,
-        cardPoster,
-      );
-
-      // 3. Advance the cursor ONLY if at least one new UID was persisted.
-      // A run that sees no new mail (highestPersistedUid === null) leaves
-      // last_uid untouched — no DB write needed.
-      if (highestPersistedUid !== null && highestPersistedUid > lastUidBefore) {
-        await saveSyncState(key, highestPersistedUid);
-        summary.lastUidAfter = highestPersistedUid;
-      } else {
-        // No advance; mirror the before value for the summary.
-        summary.lastUidAfter = lastUidBefore;
-      }
+      const iter = fetchSinceUid(client, mailbox, lastUidBefore, { limit: POLL_BATCH_LIMIT });
+      await runBatch(iter, client, mailbox, incrementalPolicy, summary, cardPoster);
     });
   } catch (err) {
     const e = err as Error;
-    // IMAP connection or fetch-level error. Record and continue so we
-    // still return a summary (partial progress is preserved in DB).
+    // IMAP connection or fetch-level error. Record and continue below so we
+    // still return a summary and advance the cursor to whatever was
+    // genuinely persisted before the failure.
     recordError(summary, { stage: 'imap', message: e.message });
+  }
+
+  // 3. Advance the cursor ONLY if at least one new UID was persisted, on
+  // EITHER path above (clean completion or mid-batch throw) — see comment
+  // above on why summary.highestPersistedUid survives a throw.
+  const { highestPersistedUid } = summary;
+  if (highestPersistedUid !== null && highestPersistedUid > lastUidBefore) {
+    try {
+      await saveSyncState(key, highestPersistedUid);
+      summary.lastUidAfter = highestPersistedUid;
+    } catch (err) {
+      const e = err as Error;
+      recordError(summary, { stage: 'db-sync-state', message: e.message });
+      summary.lastUidAfter = lastUidBefore;
+    }
+  } else {
+    summary.lastUidAfter = lastUidBefore;
   }
 
   finish(summary, summary.lastUidAfter, null);

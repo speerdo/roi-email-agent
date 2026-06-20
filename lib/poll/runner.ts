@@ -444,6 +444,12 @@ async function insertRow(input: InsertRowInput): Promise<string | null> {
  * the row is in DB, so the cursor can advance). A UID whose row insert
  * failed is NOT in the returned max, so the caller leaves last_uid alone
  * and the next run retries it.
+ *
+ * `summary.highestPersistedUid` is updated on every iteration (not just at
+ * the end) so a caller can still read out partial progress even if this
+ * loop throws partway through (e.g. the IMAP connection dies on message 20
+ * of 25) — the thrown exception propagates past this function's own
+ * `return`, but the mutation already happened on the shared `summary`.
  */
 export async function runBatch(
   messages: AsyncIterableIterator<FetchedMessage>,
@@ -453,19 +459,19 @@ export async function runBatch(
   summary: RunSummary,
   cardPoster?: CardPoster,
 ): Promise<{ highestPersistedUid: number | null }> {
-  let highest: number | null = null;
-
   for await (const msg of messages) {
     const result = await processMessage(msg, client, mailbox, policy, summary, cardPoster);
 
     if (result.status === 'inserted' || result.status === 'duplicate') {
       // Both mean "the row is in DB"; advance the cursor past them.
-      if (highest === null || msg.uid > highest) highest = msg.uid;
+      if (summary.highestPersistedUid === null || msg.uid > summary.highestPersistedUid) {
+        summary.highestPersistedUid = msg.uid;
+      }
     }
     // 'error' -> do not advance; next run retries this UID.
   }
 
-  return { highestPersistedUid: highest };
+  return { highestPersistedUid: summary.highestPersistedUid };
 }
 
 // ---- Sync state helpers ---------------------------------------------------

@@ -18,7 +18,8 @@
     "db:smoke": "tsx scripts/db-smoke.ts",
     "imap:inspect": "tsx scripts/imap-inspect.ts",
     "test:gemini": "tsx scripts/test-gemini.ts",
-    "test:smtp": "tsx scripts/test-smtp.ts"
+    "test:smtp": "tsx scripts/test-smtp.ts",
+    "backfill:cards": "tsx scripts/backfill-cards.ts"
   },
   "dependencies": {
     "@google/genai": "^2.9.0",

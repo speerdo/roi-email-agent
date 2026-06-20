@@ -19,6 +19,15 @@ export interface RunSummary {
   errors: RunError[];
   lastUidBefore: number | null;
   lastUidAfter: number | null;
+  /**
+   * Highest UID actually persisted to email_queue so far this run, updated
+   * incrementally as each message lands (not just at batch completion). A
+   * mid-batch failure (e.g. the IMAP connection dying) throws out of
+   * runBatch's loop before it can return — mutating this field as progress
+   * happens means the caller can still advance the cursor to whatever was
+   * genuinely persisted, instead of losing it back to lastUidBefore.
+   */
+  highestPersistedUid: number | null;
   nextSince: string | null;       // ISO date for backlog resumption
   startedAt: Date;
   finishedAt: Date | null;
@@ -36,6 +45,7 @@ export function newRunSummary(mailbox: string, mode: RunSummary['mode'], lastUid
     errors: [],
     lastUidBefore,
     lastUidAfter: lastUidBefore,
+    highestPersistedUid: null,
     nextSince: null,
     startedAt: new Date(),
     finishedAt: null,

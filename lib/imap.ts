@@ -40,6 +40,14 @@ function baseOptions(): ImapFlowOptions {
     auth: { user: env.EMAIL_USER, pass: env.EMAIL_PASS },
     logger: false,
     disableAutoIdle: true,
+    // ImapFlow defaults to a 300000ms (5 minute) socket timeout. In a
+    // serverless function with a much shorter maxDuration, a stalled
+    // connection would otherwise sit there for most of 5 minutes before
+    // erroring (observed live during Phase 5 verification) — way past any
+    // sane function budget. Fail fast instead so the existing try/catch
+    // in api/poll.ts gets a chance to record the error and persist
+    // whatever progress was already made.
+    socketTimeout: 30_000,
   };
 }
 

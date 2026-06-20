@@ -5,6 +5,6 @@
     { "path": "/api/poll", "schedule": "*/10 * * * *" }
   ],
   "functions": {
-    "api/*.ts": { "maxDuration": 60 }
+    "api/*.ts": { "maxDuration": 120 }
   }
 }
