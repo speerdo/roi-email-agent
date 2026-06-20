@@ -46,9 +46,19 @@ function baseOptions(): ImapFlowOptions {
 /**
  * Open an ImapFlow connection. Caller MUST guard with try/finally calling
  * client.logout() — or use withImap() below.
+ *
+ * ImapFlow's `error` event has no default listener; Node throws and kills
+ * the whole process if one ever fires unhandled (e.g. a socket timeout
+ * mid-fetch — observed live during Phase 5 verification). The listener
+ * here only logs: the same error also rejects whatever command was in
+ * flight, which is what propagates to the caller's try/catch.
  */
 export function connectImap(): ImapFlow {
-  return new ImapFlow(baseOptions());
+  const client = new ImapFlow(baseOptions());
+  client.on('error', (err: Error) => {
+    console.error('[imap] connection error:', err.message);
+  });
+  return client;
 }
 
 /**
