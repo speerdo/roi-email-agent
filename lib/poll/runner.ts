@@ -64,7 +64,20 @@ export interface RoutingContext {
   category: string;
   shouldReply: boolean;
   draftReply: string;
+  /** Full row fields needed to build a Discord card. Available since Phase 6. */
+  fromAddr: string;
+  fromName: string | undefined;
+  subject: string | undefined;
+  receivedAt: Date;
 }
+
+/**
+ * Optional side-effect callback the runner invokes when the policy decides
+ * `cardAction === 'post'`. Phase 5 passed `undefined` (runner logged only);
+ * Phase 6 passes a real `postCard` wrapper that records discord_message_id
+ * back onto the row.
+ */
+export type CardPoster = (ctx: RoutingContext, rowId: string) => Promise<void>;
 
 export type RoutingPolicy = (ctx: RoutingContext) => RoutingDecision;
 
@@ -129,6 +142,7 @@ export async function processMessage(
   mailbox: string,
   policy: RoutingPolicy,
   summary: RunSummary,
+  cardPoster?: CardPoster,
 ): Promise<ProcessMessageResult> {
   summary.processed += 1;
 
@@ -280,6 +294,10 @@ export async function processMessage(
     category: classify.category,
     shouldReply: classify.should_reply,
     draftReply: classify.draft_reply,
+    fromAddr: msg.fromAddr,
+    fromName: msg.fromName,
+    subject: msg.subject,
+    receivedAt: msg.receivedAt,
   });
 
   if (decision.status !== 'pending') {
@@ -306,11 +324,36 @@ export async function processMessage(
   }
 
   if (decision.cardAction === 'post') {
-    // Phase 5 stub: real postCard lands in Phase 6. For now log so a
-    // reviewer watching Vercel logs can see what WOULD have been carded.
-    console.log(
-      `[poll] would post card for row=${rowId} uid=${msg.uid} category=${classify.category}`,
-    );
+    if (cardPoster) {
+      try {
+        await cardPoster(
+          {
+            rowId,
+            imapUid: msg.uid,
+            category: classify.category,
+            shouldReply: classify.should_reply,
+            draftReply: classify.draft_reply,
+            fromAddr: msg.fromAddr,
+            fromName: msg.fromName,
+            subject: msg.subject,
+            receivedAt: msg.receivedAt,
+          },
+          rowId,
+        );
+      } catch (err) {
+        const e = err as Error;
+        recordError(summary, {
+          uid: msg.uid,
+          messageId,
+          stage: 'postCard',
+          message: e.message,
+        });
+      }
+    } else {
+      console.log(
+        `[poll] would post card for row=${rowId} uid=${msg.uid} category=${classify.category}`,
+      );
+    }
   }
 
   if (decision.markRead) {
@@ -408,11 +451,12 @@ export async function runBatch(
   mailbox: string,
   policy: RoutingPolicy,
   summary: RunSummary,
+  cardPoster?: CardPoster,
 ): Promise<{ highestPersistedUid: number | null }> {
   let highest: number | null = null;
 
   for await (const msg of messages) {
-    const result = await processMessage(msg, client, mailbox, policy, summary);
+    const result = await processMessage(msg, client, mailbox, policy, summary, cardPoster);
 
     if (result.status === 'inserted' || result.status === 'duplicate') {
       // Both mean "the row is in DB"; advance the cursor past them.

@@ -1,6 +1,9 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { eq } from 'drizzle-orm';
 import { fetchSinceUid, withImap } from '../lib/imap.js';
 import { getEnv } from '../lib/env.js';
+import { getDb } from '../lib/db.js';
+import { emailQueue } from '../db/schema.js';
 import {
   incrementalPolicy,
   loadSyncState,
@@ -8,7 +11,9 @@ import {
   runBatch,
   newRunSummary,
   finish,
+  type CardPoster,
 } from '../lib/poll/runner.js';
+import { postCard } from '../lib/discord/rest.js';
 import { toJSON } from '../lib/logging.js';
 
 /**
@@ -92,6 +97,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const summary = newRunSummary(key, 'incremental', lastUidBefore);
 
+  // Phase 6: real card poster. On a 'post' routing decision, sends the
+  // approval card to Discord and saves the returned message id back onto
+  // the email_queue row. Discord creds are required here — if they're
+  // missing we skip posting and record an error rather than crashing the
+  // whole poll.
+  const cardPoster: CardPoster = async (ctx) => {
+    const posted = await postCard({
+      id: ctx.rowId,
+      fromAddr: ctx.fromAddr,
+      fromName: ctx.fromName ?? null,
+      subject: ctx.subject ?? null,
+      category: ctx.category,
+      draftReply: ctx.draftReply,
+      receivedAt: ctx.receivedAt,
+    });
+    await getDb()
+      .update(emailQueue)
+      .set({ discordMessageId: posted.messageId, updatedAt: new Date() })
+      .where(eq(emailQueue.id, ctx.rowId));
+  };
+
   // 2. Fetch + process. We hold one IMAP connection for the whole batch;
   // markSeen re-enters its own read/write lock per call so it can flip
   // flags without a separate connection.
@@ -107,6 +133,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         mailbox,
         incrementalPolicy,
         summary,
+        cardPoster,
       );
 
       // 3. Advance the cursor ONLY if at least one new UID was persisted.

@@ -432,12 +432,12 @@ approve/edit/reject.
 
 Tasks:
 
-- [ ] `lib/discord/verify.ts` — Ed25519 signature verification using
+- [x] `lib/discord/verify.ts` — Ed25519 signature verification using
       `discord-interactions`' `verifyKey` (which wraps `tweetnacl`).
       Reads `DISCORD_PUBLIC_KEY` + `X-Signature-Ed25519` +
       `X-Signature-Timestamp` headers. Returns 401 on bad signature.
       PING (interaction type 1) -> respond with type 1 (PONG).
-- [ ] `lib/discord/rest.ts`:
+- [x] `lib/discord/rest.ts`:
       - `postCard(row)` -> POST a channel message with:
         - embed: From, Subject, Category, draft reply in a `code block`
           (so Adam sees exactly what will send), `received_at` for
@@ -457,10 +457,10 @@ Tasks:
       - `openEditModal(interactionId, token, row)` — respond type 9
         (modal) with a `TEXT_INPUT` (paragraph style) prefilled with
         `draft_reply`.
-- [ ] `api/poll.ts` — replace the Phase-5 "would post card" stub with a
+- [x] `api/poll.ts` — replace the Phase-5 "would post card" stub with a
       real `postCard(row)` call for reply-worthy rows (should_reply AND
       category != spam).
-- [ ] `api/discord.ts`:
+- [x] `api/discord.ts`:
   - **Always first:** `verifyKey`. 401 on failure. PING -> PONG (200
     with type 1).
   - Parse `custom_id` -> `<action>:<queueId>` (split on first `:`).
@@ -486,12 +486,12 @@ Tasks:
     3. On submit: parse the submitted text, save to `draft_reply`,
        `sendReply`, set `status='sent'`, `markSeen`, `editCard(...)` to
        "Sent (edited)".
-- [ ] `scripts/test-discord-signature.ts` — generates a valid Ed25519
+- [x] `scripts/test-discord-signature.ts` — generates a valid Ed25519
       signature for a fake PING interaction using the public key, posts
       to `localhost:3000/api/discord` via `vercel dev`, confirms a PONG.
       Then a fake `approve:<test-row-id>` against a test row inserted
       via `db-smoke.ts` — full Approve cycle locally before going live.
-- [ ] Update Phase 1's `types/env.ts` so Discord vars become required
+- [x] Update Phase 1's `types/env.ts` so Discord vars become required
       inside `api/discord.ts` and `lib/discord/*` (separate `getDiscordEnv()`
       that throws if any of the three is missing — keeps the rest of the
       app runnable without Discord provisioned).
@@ -503,6 +503,16 @@ correctly (open the thread in webmail), and the Discord card updates to
 Sent. Then an Edit cycle (modal prefilled, edited text is what sends).
 Then a Reject cycle. Then a deliberate SMTP failure (e.g., wrong recipient)
 to confirm the error path keeps the buttons.
+
+> **Status at commit:** card posting is verified live against the real
+> channel (one test card posted for an existing pending row via
+> `scripts/post-test-card.ts`). PING -> PONG signature verification is
+> verified via `scripts/test-discord-signature.ts`. The full Approve /
+> Edit / Reject / SMTP-failure live cycles are deferred to Phase 7 —
+> since `/api/discord` is not deployed, Discord button taps cannot
+> reach the handler yet. Phase 7's review re-runs those cycles against
+> the deployed endpoint.
+
 **Commit:** `phase-6: discord card posting + interaction handler`
 
 ---
