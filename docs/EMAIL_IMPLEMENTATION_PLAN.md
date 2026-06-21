@@ -263,7 +263,7 @@ For all matches: insert/upsert the `email_queue` row, store from/subject/receive
 
 ## 8. Component 2 — Discord card + interaction handler (`/api/discord`)
 
-**Posting a card (from poller):** use the Bot Token to POST a channel message with an embed (From, Subject, Category, and the draft reply in a code block or quote) and an action row of 3 buttons. Encode the `email_queue.id` in each button's `custom_id`, e.g. `approve:<id>`, `edit:<id>`, `reject:<id>`.
+**Posting a card (from poller):** use the Bot Token to POST a channel message with an embed (From, Category, Received fields; the draft reply in the embed *description* as a code block; the original email's cleaned snippet in an "Original email" field so the reviewer can judge alignment without leaving Discord) and an action row of 3 buttons. Encode the `email_queue.id` in each button's `custom_id`, e.g. `approve:<id>`, `edit:<id>`, `reject:<id>`. The draft lives in the embed `description` (4096-char cap) rather than a field (1024-char cap) specifically to avoid truncating typical drafts; the original-email field still truncates past 1024 chars but with a visible "…" marker, never silently.
 
 **Handler endpoint (`/api/discord`):**
 1. Verify the Ed25519 signature using `DISCORD_PUBLIC_KEY` and the `X-Signature-Ed25519` / `X-Signature-Timestamp` headers. Reject (401) if invalid. Respond to Discord PING (type 1) with PONG.

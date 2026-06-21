@@ -69,6 +69,8 @@ export interface RoutingContext {
   fromName: string | undefined;
   subject: string | undefined;
   receivedAt: Date;
+  /** Cleaned original-email snippet, shown on the card alongside the draft. */
+  bodySnippet: string;
 }
 
 /**
@@ -298,6 +300,7 @@ export async function processMessage(
     fromName: msg.fromName,
     subject: msg.subject,
     receivedAt: msg.receivedAt,
+    bodySnippet: snippet,
   });
 
   if (decision.status !== 'pending') {
@@ -337,6 +340,7 @@ export async function processMessage(
             fromName: msg.fromName,
             subject: msg.subject,
             receivedAt: msg.receivedAt,
+            bodySnippet: snippet,
           },
           rowId,
         );

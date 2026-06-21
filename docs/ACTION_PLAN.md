@@ -397,6 +397,34 @@ unread), sees the "would post card" logs, confirms no card was actually
 posted yet (expected).
 **Commit:** `phase-5: poller incremental path + pre-filters + gemini + db`
 
+> **Post-commit fixes (live-testing review, found three reliability bugs
+> that typecheck/lint/unit tests couldn't catch — only running against the
+> real mailbox surfaced them):**
+> 1. **Process crash on IMAP socket error** — `lib/imap.ts`'s `ImapFlow`
+>    client had no `error` listener; Node throws and kills the process on
+>    any unhandled `error` event (observed live on a socket timeout).
+>    Fixed: `connectImap()` now attaches a logging listener.
+> 2. **Batch runtime risked exceeding Vercel's `maxDuration`** — a real
+>    batch of ~24 messages took up to 337s, and ImapFlow's default 300000ms
+>    (5 min) socket timeout meant a stalled connection could hang for most
+>    of that before erroring. Fixed three ways: `lib/imap.ts` sets
+>    `socketTimeout: 30_000` (fail fast instead of hanging ~5min),
+>    `api/poll.ts`'s `POLL_BATCH_LIMIT` dropped from 25 to 10 (cron runs
+>    every 10min, so backlog just drains over more ticks), and
+>    `vercel.json` raised `maxDuration` from 60 to 120 for headroom.
+> 3. **Partial-batch progress was lost on a mid-batch connection failure**
+>    — `runBatch()` only returned `highestPersistedUid` on clean
+>    completion; a mid-loop throw discarded it, so `last_uid` stayed stuck
+>    even after many messages were genuinely persisted. Fixed by mutating
+>    `summary.highestPersistedUid` incrementally (`lib/logging.ts`'s
+>    `RunSummary`) so it survives a throw; `api/poll.ts` now advances the
+>    cursor from that field after BOTH the success path and the catch path.
+>
+> Side effect of bug #1/#2 existing before they were fixed: live test runs
+> inserted 9 real `pending` rows (genuine inbound leads) before Phase 6's
+> card-posting existed. Backfilled via the new `scripts/backfill-cards.ts`
+> (see Phase 6 status note).
+
 ---
 
 ## === GATE: Discord app provisioning ===
@@ -439,9 +467,13 @@ Tasks:
       PING (interaction type 1) -> respond with type 1 (PONG).
 - [x] `lib/discord/rest.ts`:
       - `postCard(row)` -> POST a channel message with:
-        - embed: From, Subject, Category, draft reply in a `code block`
-          (so Adam sees exactly what will send), `received_at` for
-          context.
+        - embed: title = Subject; **description** = draft reply in a
+          `code block` (description has a 4096-char cap vs. a field's
+          1024, chosen specifically so typical drafts don't truncate —
+          see post-commit fix note below); fields: From, Category,
+          Received, and **Original email** (the cleaned inbound snippet,
+          also in a code block) so Adam can judge draft-vs-original
+          alignment without leaving Discord.
         - action row of 3 buttons labelled `Approve` / `Edit` / `Reject`
           with `custom_id` = `approve:<id>` / `edit:<id>` /
           `reject:<id>`. **Note:** Discord caps `custom_id` at 100
@@ -495,6 +527,14 @@ Tasks:
       inside `api/discord.ts` and `lib/discord/*` (separate `getDiscordEnv()`
       that throws if any of the three is missing — keeps the rest of the
       app runnable without Discord provisioned).
+- [x] `scripts/backfill-cards.ts` — one-off, guarded like `test-smtp.ts`
+      (lists rows, requires a typed "yes" before posting anything real):
+      finds `status='pending' AND discord_message_id IS NULL` and posts a
+      card for each via the same `postCard()` `api/poll.ts` uses. Needed
+      because `processMessage` dedupes by `message_id` *before* it ever
+      reaches the routing/card step, so any pending row inserted before
+      card-posting existed (see Phase 5's post-commit fix note) would
+      otherwise be permanently invisible to Discord.
 
 **Review:** Adam walks through one full cycle locally: a known
 listing_request row gets a card in the test channel, taps Approve,
@@ -512,6 +552,22 @@ to confirm the error path keeps the buttons.
 > since `/api/discord` is not deployed, Discord button taps cannot
 > reach the handler yet. Phase 7's review re-runs those cycles against
 > the deployed endpoint.
+>
+> **Post-commit fixes (review feedback, both confirmed live):**
+> 1. **Card content**: Adam asked to see the original email alongside the
+>    draft (to judge alignment) and noticed long drafts were truncating.
+>    Fixed in `lib/discord/rest.ts` — draft moved from a field (1024-char
+>    cap) into the embed `description` (4096-char cap); added an
+>    "Original email" field sourced from the already-stored
+>    `email_queue.body_snippet`. Threaded `bodySnippet` through
+>    `RoutingContext` (`lib/poll/runner.ts`), the `cardPoster` in
+>    `api/poll.ts`, and `rowToCardRow` in `api/discord.ts`. Both
+>    `buildCardPayload` and `buildResolvedCardPayload` now truncate with a
+>    visible "…" marker if a value still exceeds its cap, instead of
+>    Discord silently cutting it off.
+> 2. **Orphaned leads backfilled**: ran `scripts/backfill-cards.ts` against
+>    production — posted cards for the 9 pending rows described in
+>    Phase 5's post-commit note. All 9 now have a `discord_message_id`.
 
 **Commit:** `phase-6: discord card posting + interaction handler`
 

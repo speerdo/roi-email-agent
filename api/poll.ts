@@ -120,6 +120,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       subject: ctx.subject ?? null,
       category: ctx.category,
       draftReply: ctx.draftReply,
+      bodySnippet: ctx.bodySnippet,
       receivedAt: ctx.receivedAt,
     });
     await getDb()

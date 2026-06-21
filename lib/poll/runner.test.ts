@@ -12,6 +12,7 @@ function ctx(partial: Partial<RoutingContext>): RoutingContext {
     fromName: undefined,
     subject: 'subject',
     receivedAt: new Date('2026-01-01T00:00:00Z'),
+    bodySnippet: 'snippet text',
     ...partial,
   };
 }

@@ -29,6 +29,7 @@ async function main() {
       subject: emailQueue.subject,
       category: emailQueue.category,
       draftReply: emailQueue.draftReply,
+      bodySnippet: emailQueue.bodySnippet,
       receivedAt: emailQueue.receivedAt,
     })
     .from(emailQueue)
@@ -65,6 +66,7 @@ async function main() {
         subject: r.subject,
         category: r.category,
         draftReply: r.draftReply,
+        bodySnippet: r.bodySnippet,
         receivedAt: r.receivedAt,
       });
       await db

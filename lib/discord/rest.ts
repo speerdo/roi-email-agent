@@ -22,6 +22,8 @@ export interface CardRow {
   subject: string | null;
   category: string | null;
   draftReply: string | null;
+  /** Cleaned original-email snippet (lib/mail/clean.ts), shown alongside the draft so a reviewer can judge alignment without leaving Discord. */
+  bodySnippet: string | null;
   receivedAt: Date | null;
 }
 
@@ -51,43 +53,60 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
   };
 }
 
+// ---- Truncation helpers (exported for tests) -------------------------------
+
+// Discord embed limits: title <= 256, field value <= 1024, description <=
+// 4096, and the sum of all embed text <= 6000. These helpers truncate for
+// DISPLAY ONLY — the full text always lives in the DB row, and `api/discord.ts`
+// reads `row.draftReply` directly (not the embed) when it actually sends.
+export const MAX_EMBED_TITLE = 256;
+export const MAX_EMBED_FIELD_VALUE = 1024;
+export const MAX_EMBED_DESCRIPTION = 4096;
+
+/** Plain-text truncation (no code fences) for short single-line values like the title. */
+export function truncatePlain(text: string, maxLen: number): string {
+  return text.length > maxLen ? `${text.slice(0, maxLen - 1)}…` : text;
+}
+
+/**
+ * Wraps `text` in a code block, truncating its body so the WHOLE block
+ * (fences + body + truncation marker) fits within `maxLen`. Fences cost
+ * 8 chars (```\n ... \n```); 1 more is reserved for the trailing "…" marker.
+ */
+export function codeBlock(text: string, maxLen: number, emptyPlaceholder: string): string {
+  if (text.length === 0) return emptyPlaceholder;
+  const budget = maxLen - 9;
+  const needsTrunc = text.length > budget;
+  const body = needsTrunc ? `${text.slice(0, budget - 1)}…` : text;
+  return `\`\`\`\n${body}\n\`\`\``;
+}
+
 // ---- Card build (pure helper, exported for tests) -------------------------
 
 /**
  * Build the Discord message payload (embed + action row) for a triage card.
- * Pure function: no network. The embed shows From / Subject / Category /
- * received_at and the full draft reply in a code block so the reviewer
- * sees EXACTLY what will send.
- *
- * Discord caps embed field values at 1024 chars; draft replies that exceed
- * that are truncated for DISPLAY ONLY, with a marker noting where to find
- * the full text (the DB row). The full draft is what actually sends on
- * Approve — `api/discord.ts` reads `row.draftReply` directly, not this
- * embed field.
+ * Pure function: no network. The draft reply goes in the embed
+ * `description` (4096-char cap) rather than a field (1024-char cap) so it
+ * almost never truncates given how short the prompt asks drafts to be; the
+ * original email snippet sits alongside it in a field so the reviewer can
+ * judge alignment without leaving Discord.
  */
 export function buildCardPayload(row: CardRow): Record<string, unknown> {
   const fromLabel = row.fromName ? `${row.fromName} <${row.fromAddr}>` : row.fromAddr;
-  const draft = row.draftReply && row.draftReply.length > 0 ? row.draftReply : '';
-  // Discord caps embed field values at 1024 chars. Our draft block is:
-  //   ```\n<truncated>\n```  =  3 + 1 + N + 1 + 3 = N + 8 chars.
-  // Add 1 for the trailing truncation marker. So body budget = 1024 - 8 - 1 = 1015.
-  const MAX_DRAFT_BODY = 1015;
-  const needsTrunc = draft.length > MAX_DRAFT_BODY;
-  const body = needsTrunc ? `${draft.slice(0, MAX_DRAFT_BODY - 1)}…` : draft;
-  const draftBlock = draft.length > 0
-    ? `\`\`\`\n${body}\n\`\`\``
-    : '*(no draft)*';
+  const draftBlock = codeBlock(row.draftReply ?? '', MAX_EMBED_DESCRIPTION, '*(no draft)*');
+  const snippetBlock = codeBlock(row.bodySnippet ?? '', MAX_EMBED_FIELD_VALUE, '*(no content)*');
   const received = row.receivedAt instanceof Date
     ? row.receivedAt.toISOString()
     : '(unknown time)';
 
   const embed = {
-    title: row.subject ?? '(no subject)',
+    title: truncatePlain(row.subject ?? '(no subject)', MAX_EMBED_TITLE),
+    description: draftBlock,
     fields: [
-      { name: 'From', value: fromLabel, inline: false },
+      { name: 'From', value: truncatePlain(fromLabel, MAX_EMBED_FIELD_VALUE), inline: false },
       { name: 'Category', value: row.category ?? 'other', inline: true },
       { name: 'Received', value: received, inline: true },
-      { name: 'Draft reply', value: draftBlock, inline: false },
+      { name: 'Original email', value: snippetBlock, inline: false },
     ],
     color: 0x4f46e5, // indigo, just so cards are visually distinct from chat
   };
@@ -135,21 +154,18 @@ export function buildResolvedCardPayload(row: CardRow, outcome: 'sent' | 'sent_e
   }[outcome];
 
   const fromLabel = row.fromName ? `${row.fromName} <${row.fromAddr}>` : row.fromAddr;
-  const draft = row.draftReply && row.draftReply.length > 0 ? row.draftReply : '';
-  const MAX_DRAFT_BODY = 1015;
-  const needsTrunc = draft.length > MAX_DRAFT_BODY;
-  const body = needsTrunc ? `${draft.slice(0, MAX_DRAFT_BODY - 1)}…` : draft;
-  const draftBlock = draft.length > 0
-    ? `\`\`\`\n${body}\n\`\`\``
-    : '*(no draft)*';
+  // Reserve headroom for the outcome line + separator above the draft so
+  // the combined description never exceeds MAX_EMBED_DESCRIPTION.
+  const draftBlock = codeBlock(row.draftReply ?? '', MAX_EMBED_DESCRIPTION - 100, '*(no draft)*');
+  const snippetBlock = codeBlock(row.bodySnippet ?? '', MAX_EMBED_FIELD_VALUE, '*(no content)*');
 
   const embed = {
-    title: row.subject ?? '(no subject)',
-    description: outcomeText,
+    title: truncatePlain(row.subject ?? '(no subject)', MAX_EMBED_TITLE),
+    description: `${outcomeText}\n\n${draftBlock}`,
     fields: [
-      { name: 'From', value: fromLabel, inline: false },
+      { name: 'From', value: truncatePlain(fromLabel, MAX_EMBED_FIELD_VALUE), inline: false },
       { name: 'Category', value: row.category ?? 'other', inline: true },
-      { name: 'Draft reply', value: draftBlock, inline: false },
+      { name: 'Original email', value: snippetBlock, inline: false },
     ],
     color: outcome === 'send_failed' ? 0xb91c1c : 0x16a34a,
   };

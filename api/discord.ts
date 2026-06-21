@@ -187,6 +187,7 @@ function rowToCardRow(row: typeof emailQueue.$inferSelect): CardRow {
     subject: row.subject,
     category: row.category,
     draftReply: row.draftReply,
+    bodySnippet: row.bodySnippet,
     receivedAt: row.receivedAt,
   };
 }
@@ -382,6 +383,7 @@ async function handleEditSubmit(i: AnyInteraction, queueId: string, res: VercelR
     subject: row.subject,
     category: row.category,
     draftReply: submitted,
+    bodySnippet: row.bodySnippet,
     receivedAt: row.receivedAt,
   };
 
