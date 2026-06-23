@@ -27,6 +27,22 @@ import { toJSON } from '../lib/logging.js';
 const POLL_BATCH_LIMIT = 10;
 
 /**
+ * Only fetch mail received within the last N days. This keeps a cold
+ * cursor (last_uid=0) from re-walking months of ancient mail — anything
+ * older than this cutoff is left in the inbox untouched by the poller.
+ * Backlog modes (Phase 8) cover intentional historical sweeps by date
+ * range. Default 60 days matches the backlog window in plan §10.
+ */
+const POLL_MAX_AGE_DAYS = 60;
+
+function cutoffDate(): Date {
+  const d = new Date();
+  d.setDate(d.getDate() - POLL_MAX_AGE_DAYS);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+/**
  * Per-plan §5, the incremental poller's mailbox key is
  * `${EMAIL_USER}/INBOX`. Backlog modes (Phase 8) reuse this convention.
  */
@@ -144,7 +160,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       // The runner needs an open client it can pass to markSeen for
       // pre-filter matches and (Phase 6) Approve/Reject. fetchSinceUid
       // takes a mailbox arg, so we don't pre-acquire a lock here.
-      const iter = fetchSinceUid(client, mailbox, lastUidBefore, { limit: POLL_BATCH_LIMIT });
+      const iter = fetchSinceUid(client, mailbox, lastUidBefore, {
+        limit: POLL_BATCH_LIMIT,
+        since: cutoffDate(),
+      });
       await runBatch(iter, client, mailbox, incrementalPolicy, summary, cardPoster);
     });
   } catch (err) {

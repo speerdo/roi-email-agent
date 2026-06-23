@@ -2,6 +2,11 @@ import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 import { getEnv } from './env.js';
 import { appendSent } from './imap.js';
+import {
+  TEXT_SIGNATURE,
+  buildHtmlBody,
+  signatureAttachment,
+} from './mail/signature.js';
 
 // ---- Public types ---------------------------------------------------------
 
@@ -54,11 +59,21 @@ export async function sendReply(input: SendReplyInput): Promise<SendReplyResult>
 
   const from = `"RecycleOldTech" <${env.EMAIL_USER}>`;
 
+  // Plain text: draft + branded signature block.
+  // HTML: draft (escaped, <pre> for newlines) + branded signature with
+  // inline-embedded logo via cid:signature-logo. Email clients that
+  // block remote images by default still render inline cid: attachments.
+  const text = `${input.text}\n${TEXT_SIGNATURE}`;
+  const html = buildHtmlBody(input.text);
+  const attachments = [signatureAttachment()];
+
   const info = await transport.sendMail({
     from,
     to: input.to,
     subject: input.subject,
-    text: input.text,
+    text,
+    html,
+    attachments,
     inReplyTo: input.inReplyTo,
     references: input.references,
   });

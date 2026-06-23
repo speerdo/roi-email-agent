@@ -20,6 +20,10 @@ export interface FetchedMessage {
 export interface FetchSinceOpts {
   /** Cap on messages per fetch call. Helps keep serverless runs bounded. */
   limit?: number;
+  /** Only yield messages received since this date (inclusive). Older
+   *  messages are skipped entirely — used by the incremental poller to
+   *  avoid re-walking months of ancient mail when last_uid starts at 0. */
+  since?: Date;
 }
 
 export interface FetchByDateOpts {
@@ -165,16 +169,34 @@ export async function* fetchSinceUid(
 ): AsyncIterableIterator<FetchedMessage> {
   const lock = await client.getMailboxLock(mailbox, { readOnly: true });
   try {
-    let range = `${lastUid + 1}:*`;
-    if (opts.limit) {
-      const uids = await client.search({ uid: range }, { uid: true });
-      const candidates = (Array.isArray(uids) ? uids : []).filter((u) => u > lastUid);
-      if (candidates.length === 0) return;
-      const sorted = candidates.sort((a, b) => a - b).slice(0, opts.limit);
-      range = sorted.join(',');
+    // Build the search criteria. We always constrain by UID > lastUid;
+    // when `since` is set, also constrain by internal date so we don't
+    // walk months of ancient mail on a cold cursor (last_uid=0).
+    const searchCriteria: Record<string, unknown> = { uid: `${lastUid + 1}:*` };
+    if (opts.since) {
+      searchCriteria.since = opts.since;
     }
+
+    let uids: number[] | undefined;
+    if (opts.limit || opts.since) {
+      const found = await client.search(searchCriteria, { uid: true });
+      uids = (Array.isArray(found) ? found : []).filter((u) => u > lastUid);
+      if (uids.length === 0) return;
+      uids.sort((a, b) => a - b);
+      if (opts.limit) uids = uids.slice(0, opts.limit);
+    }
+
+    const range = uids ? uids.join(',') : `${lastUid + 1}:*`;
     for await (const raw of client.fetch(range, FETCH_QUERY, { uid: true })) {
       if (raw.uid <= lastUid) continue;
+      // Defensive: when no `since` filter is set, the search range may
+      // include messages older than the cutoff if the server's UID range
+      // reordering kicked in (RFC 3501 §6.4.8). We already trust
+      // `internalDate` for the search; this second check is belt-and-
+      // suspenders for servers that don't honor `since` precisely.
+      if (opts.since && raw.internalDate instanceof Date && raw.internalDate < opts.since) {
+        continue;
+      }
       yield await parseFetched(raw);
     }
   } finally {

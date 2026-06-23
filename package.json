@@ -20,7 +20,8 @@
     "test:gemini": "tsx scripts/test-gemini.ts",
     "test:smtp": "tsx scripts/test-smtp.ts",
     "backfill:cards": "tsx scripts/backfill-cards.ts",
-    "refresh:cards": "tsx scripts/refresh-cards.ts"
+    "refresh:cards": "tsx scripts/refresh-cards.ts",
+    "mark:read": "tsx scripts/mark-all-read.ts"
   },
   "dependencies": {
     "@google/genai": "^2.9.0",
