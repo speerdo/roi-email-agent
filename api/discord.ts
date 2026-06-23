@@ -8,6 +8,7 @@
 // `config` with bodyParser:false so Vercel hands us the un-parsed stream.
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
+import { waitUntil } from '@vercel/functions';
 import { eq } from 'drizzle-orm';
 import { getDb } from '../lib/db.js';
 import { emailQueue } from '../db/schema.js';
@@ -194,9 +195,23 @@ function rowToCardRow(row: typeof emailQueue.$inferSelect): CardRow {
 
 async function handleApprove(i: AnyInteraction, queueId: string, res: VercelResponse): Promise<void> {
   // 1. Defer FIRST so Discord's 3s window is satisfied.
-  await deferInteraction(i.id, i.token);
+  try {
+    await deferInteraction(i.id, i.token);
+  } catch (err) {
+    console.error('[discord] deferInteraction failed:', (err as Error).message);
+    // Still ACK Vercel so Discord sees *something*; the button just won't
+    // show a loading state. The waitUntil work below still runs.
+  }
   res.status(200).json({ type: 6 }); // ACK to Vercel
 
+  // 2. Do the real work AFTER the response. On Vercel serverless, async
+  //    work after res.json() is NOT guaranteed to run unless wrapped in
+  //    waitUntil() — Vercel freezes the function once the response is sent.
+  //    Without this, SMTP/markSeen/DB/card-edit get silently cut off.
+  waitUntil(doApproveWork(queueId, i));
+}
+
+async function doApproveWork(queueId: string, i: AnyInteraction): Promise<void> {
   const row = await loadRowForCard(queueId);
   if (!row) {
     console.error(`[discord] approve: row ${queueId} not found`);
@@ -211,7 +226,7 @@ async function handleApprove(i: AnyInteraction, queueId: string, res: VercelResp
   const channelId = i.message?.channel_id ?? getDiscordEnv().DISCORD_CHANNEL_ID;
   const cardRow = rowToCardRow(row);
 
-  // 2. Send the reply via SMTP.
+  // Send the reply via SMTP.
   try {
     const send = await sendReply({
       to: row.fromAddr,
@@ -221,12 +236,12 @@ async function handleApprove(i: AnyInteraction, queueId: string, res: VercelResp
       references: row.emailReferences ?? undefined,
     });
 
-    // 3. Mark the inbound read (real email marked read ONLY here, per plan).
+    // Mark the inbound read (real email marked read ONLY here, per plan).
     if (row.imapUid !== null) {
       await withImap((client) => markSeen(client, 'INBOX', row.imapUid as number));
     }
 
-    // 4. Update DB row.
+    // Update DB row.
     await db
       .update(emailQueue)
       .set({
@@ -236,8 +251,9 @@ async function handleApprove(i: AnyInteraction, queueId: string, res: VercelResp
       })
       .where(eq(emailQueue.id, queueId));
 
-    // 5. Edit the card to show "Sent" + strip buttons.
+    // Edit the card to show "Sent" + strip buttons.
     await editCard(channelId, i.message?.id ?? '', buildResolvedCardPayload(cardRow, 'sent'));
+    console.log(`[discord] approve sent for ${queueId} (msg ${i.message?.id})`);
     void send;
   } catch (err) {
     const e = err as Error;
@@ -253,9 +269,6 @@ async function handleApprove(i: AnyInteraction, queueId: string, res: VercelResp
       })
       .where(eq(emailQueue.id, queueId));
     // Edit card to "Send failed" and KEEP the buttons so Adam can retry.
-    // We can't easily keep the original buttons from here without
-    // rebuilding them; do a partial update: leave components unchanged
-    // by just editing the embed description.
     try {
       await editCard(channelId, i.message?.id ?? '', {
         embeds: [{
@@ -273,9 +286,19 @@ async function handleApprove(i: AnyInteraction, queueId: string, res: VercelResp
 }
 
 async function handleReject(i: AnyInteraction, queueId: string, res: VercelResponse): Promise<void> {
-  await deferInteraction(i.id, i.token);
+  try {
+    await deferInteraction(i.id, i.token);
+  } catch (err) {
+    console.error('[discord] deferInteraction failed:', (err as Error).message);
+  }
   res.status(200).json({ type: 6 });
 
+  // Same waitUntil pattern as handleApprove — without it Vercel freezes
+  // the function before markSeen/DB update/card edit can complete.
+  waitUntil(doRejectWork(queueId, i));
+}
+
+async function doRejectWork(queueId: string, i: AnyInteraction): Promise<void> {
   const row = await loadRowForCard(queueId);
   if (!row) {
     console.error(`[discord] reject: row ${queueId} not found`);
@@ -305,6 +328,7 @@ async function handleReject(i: AnyInteraction, queueId: string, res: VercelRespo
     .where(eq(emailQueue.id, queueId));
 
   await editCard(channelId, i.message?.id ?? '', buildResolvedCardPayload(cardRow, 'rejected'));
+  console.log(`[discord] rejected ${queueId} (msg ${i.message?.id})`);
 }
 
 async function handleEdit(i: AnyInteraction, queueId: string, res: VercelResponse): Promise<void> {
@@ -351,9 +375,19 @@ async function handleEdit(i: AnyInteraction, queueId: string, res: VercelRespons
 async function handleEditSubmit(i: AnyInteraction, queueId: string, res: VercelResponse): Promise<void> {
   // Modal submit gives us ~45 min, but SMTP can still exceed 3s on cold
   // paths — defer first.
-  await deferInteraction(i.id, i.token);
+  try {
+    await deferInteraction(i.id, i.token);
+  } catch (err) {
+    console.error('[discord] deferInteraction failed:', (err as Error).message);
+  }
   res.status(200).json({ type: 6 });
 
+  // Same waitUntil pattern as Approve — SMTP/markSeen/DB/card-edit must
+  // survive past the response or Vercel freezes them out.
+  waitUntil(doEditSubmitWork(queueId, i));
+}
+
+async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<void> {
   const row = await loadRowForCard(queueId);
   if (!row) {
     console.error(`[discord] edit_submit: row ${queueId} not found`);
@@ -413,6 +447,7 @@ async function handleEditSubmit(i: AnyInteraction, queueId: string, res: VercelR
     // Edit the original card (the one the Edit button was on, NOT a new
     // message). For modal submits, `i.message` is the original card.
     await editCard(channelId, i.message?.id ?? '', buildResolvedCardPayload(cardRow, 'sent_edited'));
+    console.log(`[discord] edit_submit sent for ${queueId} (msg ${i.message?.id})`);
     void send;
   } catch (err) {
     const e = err as Error;

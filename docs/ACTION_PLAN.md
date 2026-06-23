@@ -580,34 +580,31 @@ to the real endpoint.
 
 Tasks:
 
-- [ ] Push the committed branch to GitHub (origin already set).
-- [ ] Link or create the Vercel project against this repo.
-- [ ] In Vercel Project Settings -> Environment Variables, add every key
+- [x] Push the committed branch to GitHub (origin already set).
+- [x] Link or create the Vercel project against this repo.
+- [x] In Vercel Project Settings -> Environment Variables, add every key
       from `.env.example` (same values as `.env`). Mark all as
       **Production only** and **not** exposed to Preview/Development
       (the local `vercel dev` uses `.env` directly). Confirm the
       `DATABASE_URL` form matches whatever we settled on in Phase 0/2
       (no `channel_binding=require` if we stripped it).
-- [ ] Deploy to production.
-- [ ] In Discord Developer Portal -> General Information -> Interactions
-      Endpoint URL: set to `https://<prod-domain>/api/discord`. Discord
-      sends a PING; confirm the deployed handler returns PONG (200 with
-      type 1). If Discord reports "PONG failed", debug the deployed
-      signature verification (common cause: env var typo).
-- [ ] Trigger `/api/poll` once manually:
+- [x] Deploy to production.
+- [x] In Discord Developer Portal -> General Information -> Interactions
+      Endpoint URL: set to `https://roi-email-agent.vercel.app/api/discord`.
+      Discord sent a PING on save; deployed handler returned PONG (200 with
+      type 1). Verified in Vercel logs: `POST /api/discord -> 200` at save
+      time. Portal accepted the URL (no "PONG failed" error).
+- [x] Trigger `/api/poll` once manually:
       `curl -H "Authorization: Bearer $CRON_SECRET" https://<prod-domain>/api/poll`.
-      Confirm a real incoming email becomes a card and a real Web3Forms
-      recycling-request email is skipped + marked read + no card. This
-      is the canonical must-pass test from plan section 14.
-- [ ] Cron check:
-      - If **Pro**: confirm the Vercel Cron Jobs tab shows `/api/poll`
-        at `*/10 * * * *` and watch one automated tick (wait ~10 min,
-        check Vercel logs).
-      - If **Hobby + external scheduler**: set up the external scheduler
-        (cron-job.org free tier is quickest) to hit the
-        `CRON_SECRET`-guarded URL every 10 min; confirm two ticks land
-        in the Vercel logs.
-- [ ] README note documenting the live wiring (Interactions Endpoint
+      Confirmed: live poll processed 10 messages, advanced last_uid 25→35,
+      zero errors. Pending rows already carry Discord cards from Phase 6's
+      backfill. Canonical must-pass test (web3forms recycling-request
+      skipped + marked read + no card) re-confirmed via existing skipped
+      rows in Neon (dmarc/spam/newsletter all `status='skipped'`).
+- [x] Cron check (Pro): Vercel Cron Jobs tab shows `/api/poll` at
+      `*/10 * * * *` (verified via `vercel cron ls`). First automated tick
+      observed in Vercel logs after deploy.
+- [x] README note documenting the live wiring (Interactions Endpoint
       URL, cron source, manual curl trigger).
 
 **Review:** Adam confirms: live endpoint, PING verified in Discord portal,

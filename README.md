@@ -112,6 +112,34 @@ After the first deploy, set the Discord **Interactions Endpoint URL** in
 the Discord Developer Portal to `https://<prod-domain>/api/discord` and
 confirm the PING returns PONG.
 
+## Live wiring (Phase 7)
+
+Once deployed to production:
+
+- **Cron:** registered in `vercel.json` (`/api/poll` at `*/10 * * * *`).
+  Confirmed in the Vercel dashboard → Cron Jobs tab (Vercel Pro required
+  for sub-hourly).
+- **Discord Interactions Endpoint URL:** in the Discord Developer Portal →
+  General Information → Interactions Endpoint URL, set
+  `https://roi-email-agent.vercel.app/api/discord`. Discord sends a PING
+  on save; the deployed handler returns PONG (type 1) after Ed25519
+  signature verification. If the portal reports "PONG failed", check that
+  `DISCORD_PUBLIC_KEY` is set on Vercel (Production env) and matches the
+  app's public key exactly.
+- **Manual poll trigger (bypassing the cron):**
+  ```bash
+  curl -H "Authorization: Bearer $CRON_SECRET" \
+    https://roi-email-agent.vercel.app/api/poll
+  ```
+  Returns a JSON run summary (counts by category/status/skip_reason,
+  `lastUidBefore`/`lastUidAfter`, errors). Use this to drain a burst of
+  mail without waiting for the next cron tick, or to verify a deploy.
+- **Env vars:** all keys live in Vercel Project Settings as **Production
+  only** (not exposed to Preview/Development — preview deploys use Vercel
+  dev's local `.env`). `DATABASE_URL` uses the `sslmode=require`-only form
+  (no `channel_binding=require`, which the `@neondatabase/serverless` HTTP
+  driver doesn't need and which can cause handshake errors).
+
 ## Cron
 
 `vercel.json` defines a `*/10 * * * *` cron hitting `/api/poll`. The
