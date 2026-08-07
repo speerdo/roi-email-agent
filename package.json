@@ -21,6 +21,11 @@
     "test:smtp": "tsx scripts/test-smtp.ts",
     "backfill:cards": "tsx scripts/backfill-cards.ts",
     "refresh:cards": "tsx scripts/refresh-cards.ts",
+    "backfill:reply-to": "tsx scripts/backfill-reply-to.ts",
+    "reconcile:seen": "tsx scripts/reconcile-seen.ts",
+    "retry:errors": "tsx scripts/retry-errors.ts",
+    "bounce:digest": "tsx scripts/bounce-digest.ts",
+    "sync:cities": "tsx scripts/sync-cities.ts",
     "mark:read": "tsx scripts/mark-all-read.ts"
   },
   "dependencies": {

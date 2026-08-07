@@ -17,6 +17,22 @@ export interface RunSummary {
   bySkipReason: Record<string, number>;
   byStatus: Record<string, number>;
   errors: RunError[];
+  /** UIDs successfully flagged \\Seen this run (via the post-batch
+   *  markSeenBatch flush). Surfaces in the JSON summary so a reviewer can
+   *  confirm the previously-broken mark-read path is now working. */
+  markedRead: number;
+  /** Count of UIDs below the cursor that the POLL_MAX_AGE_DAYS date
+   *  filter excluded from this run (SPEC §3.7). When cron is broken or
+   *  the mailbox is quiet for >60 days, real mail lands here with no
+   *  row and no way to notice. The Phase 9 error alert surfaces a
+   *  non-zero count. -1 means "not checked this run" (e.g. cold start). */
+  skippedByAgeCutoff: number;
+  /** Filter-drift warnings (SPEC §3.11): a Web3Forms message whose
+   *  subject looks like a recycling request did NOT match the recycling
+   *  pre-filter — usually means the form's subject template changed and
+   *  300+ submissions/yr are about to start hitting Gemini. Each entry
+   *  is a short description; the Discord error-alert post surfaces them. */
+  filterDriftWarnings: string[];
   lastUidBefore: number | null;
   lastUidAfter: number | null;
   /**
@@ -43,6 +59,9 @@ export function newRunSummary(mailbox: string, mode: RunSummary['mode'], lastUid
     bySkipReason: {},
     byStatus: {},
     errors: [],
+    markedRead: 0,
+    skippedByAgeCutoff: -1,
+    filterDriftWarnings: [],
     lastUidBefore,
     lastUidAfter: lastUidBefore,
     highestPersistedUid: null,
@@ -88,6 +107,9 @@ export function toJSON(s: RunSummary): Record<string, unknown> {
     byStatus: s.byStatus,
     errors: s.errors,
     errorCount: s.errors.length,
+    markedRead: s.markedRead,
+    skippedByAgeCutoff: s.skippedByAgeCutoff,
+    filterDriftWarnings: s.filterDriftWarnings,
     lastUidBefore: s.lastUidBefore,
     lastUidAfter: s.lastUidAfter,
     nextSince: s.nextSince,

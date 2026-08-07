@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { eq } from 'drizzle-orm';
-import { fetchSinceUid, withImap } from '../lib/imap.js';
+import { fetchSinceUid, withImap, markSeenBatch } from '../lib/imap.js';
 import { getEnv } from '../lib/env.js';
 import { getDb } from '../lib/db.js';
 import { emailQueue } from '../db/schema.js';
@@ -14,7 +14,8 @@ import {
   type CardPoster,
 } from '../lib/poll/runner.js';
 import { postCard } from '../lib/discord/rest.js';
-import { toJSON } from '../lib/logging.js';
+import { toJSON, toDiscordLine } from '../lib/logging.js';
+import { getDiscordEnv } from '../types/env.js';
 
 /**
  * Cap on messages fetched per cron tick. Cron fires every 10 minutes (see
@@ -81,12 +82,16 @@ function authenticate(req: VercelRequest, res: VercelResponse): boolean {
  *   2. Load last_uid from email_sync_state for ${EMAIL_USER}/INBOX.
  *   3. Open IMAP read-only, fetchSinceUid(lastUid) (peek — does not set Seen).
  *   4. Per message: dedupe -> pre-filter -> classify -> insert+route. The
- *      runner closes the IMAP read-only lock and re-opens for markSeen when
- *      a pre-filter or routing decision says so.
- *   5. Update email_sync_state.last_uid to the highest UID successfully
+ *      runner does NOT call markSeen inline (that would nest a write lock
+ *      inside the fetch generator's read-only lock on the same client and
+ *      deadlock — see lib/imap.ts markSeen doc). Instead it collects the
+ *      UIDs whose routing decision said markRead and returns them.
+ *   5. After the generator exhausts (read-only lock released), call
+ *      markSeenBatch on the collected UIDs — one IMAP command per 500 UIDs.
+ *   6. Update email_sync_state.last_uid to the highest UID successfully
  *      persisted (NOT processed — a row that failed to insert does NOT
  *      advance the cursor; the next run retries it).
- *   6. Return a RunSummary JSON.
+ *   7. Return a RunSummary JSON.
  *
  * Backlog modes (`?mode=backlog-classify|backlog-draft`) are added in
  * Phase 8; this handler 400s on them for now so Vercel logs are clear.
@@ -133,11 +138,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       id: ctx.rowId,
       fromAddr: ctx.fromAddr,
       fromName: ctx.fromName ?? null,
+      replyTo: ctx.replyTo ?? null,
       subject: ctx.subject ?? null,
       category: ctx.category,
       draftReply: ctx.draftReply,
       bodySnippet: ctx.bodySnippet,
       receivedAt: ctx.receivedAt,
+      routing: ctx.routing ?? null,
     });
     await getDb()
       .update(emailQueue)
@@ -145,9 +152,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .where(eq(emailQueue.id, ctx.rowId));
   };
 
-  // 2. Fetch + process. We hold one IMAP connection for the whole batch;
-  // markSeen re-enters its own read/write lock per call so it can flip
-  // flags without a separate connection.
+  // 2. Fetch + process. We hold one IMAP connection for the whole batch.
+  // runBatch collects the UIDs whose routing decision said markRead but
+  // does NOT call markSeen inline (that would nest a write lock inside
+  // the fetch generator's read-only lock on the same client and deadlock
+  // — see lib/imap.ts markSeen doc + SPEC §1.2). We flush them in one
+  // markSeenBatch call after runBatch returns, when the fetch lock has
+  // been released.
   //
   // runBatch mutates summary.highestPersistedUid as each message lands, so
   // it holds the right value to advance the cursor to even if the batch
@@ -155,16 +166,76 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // of 25) — without this, a mid-batch failure would silently discard
   // already-persisted progress and leave last_uid stuck, forcing every
   // later run to re-walk the same already-handled messages via dedupe.
+  let seenUids: number[] = [];
   try {
     await withImap(async (client) => {
-      // The runner needs an open client it can pass to markSeen for
-      // pre-filter matches and (Phase 6) Approve/Reject. fetchSinceUid
-      // takes a mailbox arg, so we don't pre-acquire a lock here.
+      // SPEC §3.7: detect mail this run is about to skip silently. The
+      // fetch below constrains on BOTH `uid > lastUid` and `since cutoff`,
+      // so a message ABOVE the cursor but OLDER than the cutoff is never
+      // yielded, never gets a row, and yet the cursor still advances past
+      // it once any newer message persists. That is the silent-drop path:
+      // no row, no log, no alert.
+      //
+      // The window must be UIDs ABOVE the cursor. Counting UIDs at or
+      // below it would count already-processed mail (everything below the
+      // cursor has a row by definition), which in a mailbox with any
+      // history is a permanently non-zero number — and since a non-zero
+      // count fires the Discord alert below, that would post an alert on
+      // every single cron tick. Normally this count is 0 and only goes
+      // non-zero in the real failure mode (cron down longer than the
+      // cutoff, or an old message arriving with a fresh UID).
+      try {
+        const lock = await client.getMailboxLock(mailbox, { readOnly: true, acquireTimeout: 15_000 });
+        try {
+          const skipped = await client.search(
+            { uid: `${lastUidBefore + 1}:*`, before: cutoffDate() },
+            { uid: true },
+          );
+          // RFC 3501 §6.4.8: `n:*` where n exceeds every existing UID can
+          // come back with the highest existing UID instead of empty, so
+          // drop anything that isn't actually above the cursor.
+          const genuinelySkipped = (Array.isArray(skipped) ? skipped : []).filter(
+            (u) => u > lastUidBefore,
+          );
+          summary.skippedByAgeCutoff = genuinelySkipped.length;
+          if (summary.skippedByAgeCutoff > 0) {
+            console.warn(
+              `[poll] ${summary.skippedByAgeCutoff} message(s) above cursor ${lastUidBefore} are older than ${POLL_MAX_AGE_DAYS} days and will NOT be processed (uids: ${genuinelySkipped.slice(0, 20).join(',')}). Raise POLL_MAX_AGE_DAYS or handle them manually.`,
+            );
+          }
+        } finally {
+          lock.release();
+        }
+      } catch (err) {
+        // Non-fatal: the age-cutoff check is a guard rail, not a
+        // prerequisite for the main poll path.
+        const e = err as Error;
+        console.warn(`[poll] age-cutoff check failed (non-fatal): ${e.message}`);
+      }
+
       const iter = fetchSinceUid(client, mailbox, lastUidBefore, {
         limit: POLL_BATCH_LIMIT,
         since: cutoffDate(),
       });
-      await runBatch(iter, client, mailbox, incrementalPolicy, summary, cardPoster);
+      const result = await runBatch(iter, client, mailbox, incrementalPolicy, summary, cardPoster);
+      seenUids = result.seenUids;
+
+      // Flush all markRead UIDs in one batched IMAP command. The fetch
+      // generator is now exhausted, so the read-only mailbox lock is
+      // released and markSeenBatch can safely acquire its own write lock
+      // on this same client. A failure here is non-fatal: rows are already
+      // persisted and the cursor will advance; the only consequence is
+      // those messages stay unread in webmail until the next run or the
+      // reconcile-seen.ts one-time drain.
+      if (seenUids.length > 0) {
+        try {
+          await markSeenBatch(client, mailbox, seenUids);
+          summary.markedRead = seenUids.length;
+        } catch (err) {
+          const e = err as Error;
+          recordError(summary, { stage: 'markseen', message: `markSeenBatch failed: ${e.message}` });
+        }
+      }
     });
   } catch (err) {
     const e = err as Error;
@@ -194,13 +265,43 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   finish(summary, summary.lastUidAfter, null);
   const elapsed = Date.now() - startedAt.getTime();
   console.log(
-    `[poll] done in ${elapsed}ms — processed=${summary.processed} errors=${summary.errors.length} lastUid ${lastUidBefore}->${summary.lastUidAfter}`,
+    `[poll] done in ${elapsed}ms — processed=${summary.processed} errors=${summary.errors.length} markedRead=${summary.markedRead} skippedByAge=${summary.skippedByAgeCutoff} lastUid ${lastUidBefore}->${summary.lastUidAfter}`,
   );
+
+  // SPEC §3.9 / Phase 9 error alert: if a poll run has any errors, any
+  // age-cutoff-skipped mail, or any filter-drift warnings, post a
+  // one-liner to the Discord approval channel so it surfaces somewhere a
+  // human actually looks, rather than sitting in Vercel logs nobody
+  // watches. Best-effort — a Discord outage here must not fail the poll.
+  const driftCount = summary.filterDriftWarnings.length;
+  if (summary.errors.length > 0 || summary.skippedByAgeCutoff > 0 || driftCount > 0) {
+    try {
+      const { DISCORD_CHANNEL_ID, DISCORD_BOT_TOKEN } = getDiscordEnv();
+      const parts = [toDiscordLine(summary)];
+      if (summary.skippedByAgeCutoff > 0) {
+        parts.push(`⚠️ ${summary.skippedByAgeCutoff} msgs older than ${POLL_MAX_AGE_DAYS}d skipped`);
+      }
+      if (driftCount > 0) {
+        parts.push(`⚠️ ${driftCount} filter-drift warning(s) — check AUTOMATED_FORM_SUBJECTS`);
+      }
+      await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ content: parts.join(' ') }),
+      });
+    } catch (err) {
+      // Non-fatal: the poll itself succeeded; the alert is best-effort.
+      console.warn('[poll] error-alert Discord post failed:', (err as Error).message);
+    }
+  }
 
   // Always 200 with the summary; a 500 would make Vercel's cron retry logic
   // fire and we don't want that for partial-success runs. Real catastrophic
-  // failures (IMAP down) still return 200 with the error recorded; Phase 9
-  // alerting handles the "errors > 0" Discord notification.
+  // failures (IMAP down) still return 200 with the error recorded; the
+  // Discord alert above handles "errors > 0".
   res.status(200).json(toJSON(summary));
 }
 

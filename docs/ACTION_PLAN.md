@@ -617,7 +617,21 @@ tweaks discovered during deploy here)
 
 ---
 
-## Phase 8 — Backlog modes (cleanup of the existing unread pile)
+## Phase 8 — Backlog modes (**SUPERSEDED 2026-08-07**)
+
+> **Status: superseded by the SPEC_TRIAGE_FIXES triage.** The backlog
+> problem these modes were designed to solve is now handled by:
+>   - `npm run reconcile:seen` (drains the unread pile that the markSeen
+>     deadlock left behind — see SPEC §1.5)
+>   - `npm run retry:errors` (re-runs Gemini classification for error
+>     rows — see SPEC §3.9)
+>   - the fixed incremental poller itself (markSeenBatch now actually
+>     marks read, so the pile no longer grows — SPEC §1.3)
+>
+> The `?mode=backlog-classify` and `?mode=backlog-draft` endpoints were
+> never built (the handler 400'd on any `?mode=`) and the README section
+> documenting them has been removed. Keeping this phase's design notes
+> below for historical context only; do not implement.
 
 Goal: drain `hello@`'s 60-day backlog per plan section 10, without
 flooding Discord and without silently marking real email read.

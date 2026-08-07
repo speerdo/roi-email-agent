@@ -3,6 +3,7 @@ import {
   matchRecyclingRequest,
   matchNewsletter,
   matchDmarc,
+  matchBounce,
   runPrefilters,
   resetPrefilterConfig,
 } from './prefilter.js';
@@ -121,6 +122,30 @@ describe('matchDmarc', () => {
   });
 });
 
+describe('matchBounce', () => {
+  it('matches MAILER-DAEMON@ sender (case-insensitive)', () => {
+    expect(matchBounce('MAILER-DAEMON@mx.privateemail.com')).toBe(true);
+    expect(matchBounce('mailer-daemon@example.com')).toBe(true);
+  });
+  it('matches postmaster@ sender', () => {
+    expect(matchBounce('postmaster@corp.example')).toBe(true);
+  });
+  it('matches multipart/report content-type with delivery-status report-type', () => {
+    expect(
+      matchBounce('random@x.com', 'multipart/report; report-type=delivery-status; boundary="..."'),
+    ).toBe(true);
+  });
+  it('does NOT match multipart/report without delivery-status report-type', () => {
+    expect(matchBounce('random@x.com', 'multipart/report; report-type=other')).toBe(false);
+  });
+  it('does NOT match a normal sender with a normal content-type', () => {
+    expect(matchBounce('jane@example.com', 'text/plain')).toBe(false);
+  });
+  it('does NOT match when contentType is absent and From is not a DSN sender', () => {
+    expect(matchBounce('jane@example.com')).toBe(false);
+  });
+});
+
 describe('runPrefilters', () => {
   it('matches recycling first and returns the right metadata', () => {
     const r = runPrefilters({
@@ -159,6 +184,28 @@ describe('runPrefilters', () => {
       skipReason: 'dmarc_report',
       markRead: true,
     });
+  });
+
+  it('matches bounce fourth (MAILER-DAEMON sender)', () => {
+    const r = runPrefilters({
+      subject: 'Undelivered Mail Returned to Sender',
+      from: { address: 'MAILER-DAEMON@mx.privateemail.com' },
+    });
+    expect(r).toMatchObject({
+      matched: true,
+      category: 'bounce',
+      skipReason: 'bounce',
+      markRead: true,
+    });
+  });
+
+  it('matches bounce fourth (multipart/report content-type)', () => {
+    const r = runPrefilters({
+      subject: 'Delivery Status Notification (Failure)',
+      from: { address: 'postmaster@corp.example' },
+      contentType: 'multipart/report; report-type=delivery-status',
+    });
+    expect(r).toMatchObject({ matched: true, category: 'bounce' });
   });
 
   it('returns no match when nothing applies', () => {

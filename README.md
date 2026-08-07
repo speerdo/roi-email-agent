@@ -161,31 +161,41 @@ api/           serverless endpoints
   discord.ts   interaction handler: approve/edit/reject
 lib/           shared logic
   db.ts        singleton Drizzle client over @neondatabase/serverless
-  mail/        IMAP, body cleaning, pre-filter matcher
+  mail/        IMAP, body cleaning, pre-filter matcher, recipient + headers + templates
   gemini/      Gemini client + prompt
   discord/     REST helpers, signature verification
   poll/        per-message runner (incremental + backlog)
+  site/        city-page index + recycling_help URL resolver
   smtp.ts      outbound reply sender
 db/            Drizzle schema
   schema.ts    email_queue + email_sync_state
 drizzle/       generated migrations
-scripts/       one-shot utilities (preflight, db-smoke)
+scripts/       one-shot utilities (preflight, db-smoke, backfill, sync:cities, reconcile:seen, bounce:digest)
 types/         env types + helpers
-docs/          implementation plan + action plan
+docs/          implementation plan, action plan, triage-fix spec
 ```
 
-## Background modes
+## Operations runbook
 
-Once the incremental poller is live, drain the pre-existing backlog via
-two CRON_SECRET-guarded modes on `/api/poll`:
+One-shot utilities (all `CRON_SECRET`-independent; run locally with `npm run <script>`):
 
-- `?mode=backlog-classify&since=YYYY-MM-DD&limit=25` — inventory only,
-  noise marked read + skipped, real email classified but left unread,
-  no drafts, no cards. Returns a summary with `nextSince` for paging.
-- `?mode=backlog-draft&category=listing_request` — drafts + cards for
-  the chosen category, on demand. Clear at your pace.
-
-Both modes are no-ops on `email_sync_state.last_uid` (the incremental
-cursor); they rely entirely on `message_id` dedupe.
-
-See `docs/ACTION_PLAN.md` Phase 8 for the full runbook.
+- `npm run backfill:reply-to` — re-fetch the `Reply-To` header for
+  existing rows and report which already-sent replies went to the wrong
+  address (the Web3Forms bug — see `docs/SPEC_TRIAGE_FIXES.md` §2.2).
+  Run once after deploying the Reply-To fix.
+- `npm run reconcile:seen` — drain the existing pile of unread mail that
+  should have been marked read but wasn't (the markSeen deadlock — §1.5).
+  Leaves pending cards and error rows untouched. Run once after
+  deploying the markSeenBatch fix.
+- `npm run retry:errors` — re-run Gemini classification for `status=error`
+  rows whose failure was in the classify stage (e.g. after a model
+  retirement). Recovers what it can; leaves still-failing rows as error.
+- `npm run sync:cities` — refresh `assets/city-index.json` from
+  `https://www.recycleoldtech.com/api/cities-data`. Validates before
+  overwriting. Run on each release or monthly.
+- `npm run bounce:digest` — post a weekly summary of pre-filtered bounces
+  to the Discord approval channel. Intended for a weekly cron.
+- `npm run refresh:cards` — re-edit existing pending Discord cards in
+  place to the current card format (idempotent, preserves message ids).
+- `npm run mark:read` — bulk-mark EVERY unread message read. Nuclear
+  option; prefer `reconcile:seen` which respects pending/error rows.

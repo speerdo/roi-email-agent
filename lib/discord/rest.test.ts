@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { buildCardPayload, buildResolvedCardPayload, type CardRow } from './rest.js';
 
+// recipientDisplay reads process.env.EMAIL_USER; set it for these tests so
+// the "Reply to" field resolves deterministically.
+process.env.EMAIL_USER = 'hello@recycleoldtech.com';
+
 interface CardPayload {
   embeds: Array<{
     title: string;
@@ -23,11 +27,13 @@ function sampleRow(overrides: Partial<CardRow> = {}): CardRow {
     id: '550e8400-e29b-41d4-a716-446655440000',
     fromAddr: 'someone@example.com',
     fromName: 'Someone',
+    replyTo: null,
     subject: 'Please list us',
     category: 'listing_request',
     draftReply: 'Hi, head to https://recycleoldtech.com/claims to submit.',
     bodySnippet: "Hi, I'd like to be added to your directory of recyclers.",
     receivedAt: new Date('2026-06-20T12:00:00Z'),
+    routing: null,
     ...overrides,
   };
 }
@@ -49,25 +55,64 @@ describe('buildCardPayload', () => {
     });
   });
 
-  it('embed includes From, Category, Received, Original email fields, draft in the description code block', () => {
+  it('embed includes Reply to, Category, Received, Original email fields, draft in the description code block', () => {
     const p = payload(buildCardPayload(sampleRow()));
     const embed = p.embeds[0]!;
     expect(embed.title).toBe('Please list us');
     expect(embed.description).toContain('```');
     expect(embed.description).toContain('recycleoldtech.com/claims');
     const byName = Object.fromEntries(embed.fields.map((f) => [f.name, f.value]));
-    expect(byName['From']).toContain('Someone <someone@example.com>');
+    // From display name is kept when the reply goes to From — it belongs
+    // to the actual recipient there.
+    expect(byName['Reply to']).toBe('Someone <someone@example.com>');
     expect(byName['Category']).toBe('listing_request');
     expect(byName['Received']).toContain('2026-06-20');
     expect(byName['Original email']).toContain('```');
     expect(byName['Original email']).toContain('added to your directory');
   });
 
-  it('handles missing name (From shows bare address)', () => {
+  it('handles missing name (Reply to shows bare address)', () => {
     const p = payload(buildCardPayload(sampleRow({ fromName: null })));
     const embed = p.embeds[0]!;
     const byName = Object.fromEntries(embed.fields.map((f) => [f.name, f.value]));
-    expect(byName['From']).toBe('someone@example.com');
+    expect(byName['Reply to']).toBe('someone@example.com');
+  });
+
+  it('renders "via" annotation when Reply-To reroutes the reply (Web3Forms)', () => {
+    const p = payload(
+      buildCardPayload(
+        sampleRow({ fromName: 'Notifications', fromAddr: 'notify@web3forms.com', replyTo: 'fcrman@aol.com' }),
+      ),
+    );
+    const byName = Object.fromEntries(p.embeds[0]!.fields.map((f) => [f.name, f.value]));
+    expect(byName['Reply to']).toBe('fcrman@aol.com (via notify@web3forms.com)');
+  });
+
+  it('renders a no-reply-target marker when From is a noreply address', () => {
+    const p = payload(buildCardPayload(sampleRow({ fromAddr: 'noreply@example.com' })));
+    const byName = Object.fromEntries(p.embeds[0]!.fields.map((f) => [f.name, f.value]));
+    expect(byName['Reply to']).toContain('no reply target');
+  });
+
+  it('includes a Routing field for recycling_help when routing is set', () => {
+    const p = payload(
+      buildCardPayload(
+        sampleRow({
+          fromName: 'Kevin',
+          fromAddr: 'troskoskiki83@gmail.com',
+          category: 'recycling_help',
+          routing: 'Greencastle, PA -> /states/pennsylvania/greencastle',
+        }),
+      ),
+    );
+    const byName = Object.fromEntries(p.embeds[0]!.fields.map((f) => [f.name, f.value]));
+    expect(byName['Routing']).toBe('Greencastle, PA -> /states/pennsylvania/greencastle');
+  });
+
+  it('omits the Routing field when routing is null (non-recycling_help categories)', () => {
+    const p = payload(buildCardPayload(sampleRow()));
+    const names = p.embeds[0]!.fields.map((f) => f.name);
+    expect(names).not.toContain('Routing');
   });
 
   it('handles empty draft and empty snippet (renders placeholders)', () => {

@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 import { getEnv } from './env.js';
 import { appendSent } from './imap.js';
+import { replyInReplyTo, replyReferences, replySubject } from './mail/headers.js';
 import {
   TEXT_SIGNATURE,
   buildHtmlBody,
@@ -12,12 +13,21 @@ import {
 
 export interface SendReplyInput {
   to: string;
+  /** Subject of the INBOUND message. We add `Re: ` here (idempotently)
+   *  rather than trusting callers to remember — see lib/mail/headers.ts
+   *  replySubject(). */
   subject: string;
   text: string;
-  /** Original Message-ID header, for threading (In-Reply-To). */
-  inReplyTo?: string;
-  /** References header chain, for threading. */
-  references?: string;
+  /** The INBOUND message's own Message-ID (i.e. row.messageId). Used as
+   *  the outbound reply's In-Reply-To anchor and appended to References.
+   *  NOT the inbound's In-Reply-To (which points at the inbound's PARENT
+   *  and is the wrong thread anchor for our reply) — see
+   *  lib/mail/headers.ts for the threading rationale. */
+  inboundMessageId?: string;
+  /** The INBOUND message's References header chain (i.e.
+   *  row.emailReferences). The outbound reply's References = this chain
+   *  + inboundMessageId, per RFC 5322 §3.6.4. */
+  inboundReferences?: string;
 }
 
 export interface SendReplyResult {
@@ -48,6 +58,13 @@ function getTransport(): Transporter {
  * In-Reply-To + References headers. Per plan §11, the display name is
  * "RecycleOldTech" and the from address is EMAIL_USER.
  *
+ * Threading headers (SPEC §3.3): the reply's In-Reply-To is the INBOUND
+ * message's Message-ID (NOT the inbound's In-Reply-To, which points at
+ * its parent). References = the inbound's References + inbound Message-ID.
+ * Subject is prefixed with `Re: ` idempotently. All three are derived
+ * here from the row-shaped input rather than trusting callers, so a
+ * future caller can't accidentally pass the wrong header.
+ *
  * After a successful send, attempts to append the sent raw message to the
  * IMAP `Sent` folder (Phase 9 nice-to-have; currently a stub that logs
  * "not implemented"). The append failure is non-fatal — the email was
@@ -58,6 +75,14 @@ export async function sendReply(input: SendReplyInput): Promise<SendReplyResult>
   const transport = getTransport();
 
   const from = `"RecycleOldTech" <${env.EMAIL_USER}>`;
+
+  // Derive threading headers from the inbound row. These MUST come from
+  // row.messageId (the inbound's own ID) and row.emailReferences (the
+  // inbound's References chain) — NOT from row.inReplyTo, which is the
+  // inbound's PARENT and the wrong thread anchor. See lib/mail/headers.ts.
+  const subject = replySubject(input.subject);
+  const inReplyTo = replyInReplyTo(input.inboundMessageId);
+  const references = replyReferences(input.inboundMessageId, input.inboundReferences);
 
   // Plain text: draft + branded signature block.
   // HTML: draft (escaped, <pre> for newlines) + branded signature with
@@ -70,12 +95,13 @@ export async function sendReply(input: SendReplyInput): Promise<SendReplyResult>
   const info = await transport.sendMail({
     from,
     to: input.to,
-    subject: input.subject,
+    subject,
     text,
     html,
     attachments,
-    inReplyTo: input.inReplyTo,
-    references: input.references,
+    // nodemailer types reject null; only pass the headers when non-null.
+    ...(inReplyTo ? { inReplyTo } : {}),
+    ...(references ? { references } : {}),
   });
 
   // Best-effort mirror to IMAP Sent folder. Phase 9 will implement

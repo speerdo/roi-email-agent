@@ -5,6 +5,7 @@ import { SYSTEM_PROMPT, buildUserContent } from './prompt.js';
 // ---- Public types ---------------------------------------------------------
 
 export type GeminiCategory =
+  | 'recycling_help'
   | 'listing_request'
   | 'partner_inquiry'
   | 'support'
@@ -13,11 +14,39 @@ export type GeminiCategory =
   | 'spam'
   | 'other';
 
+/** Optional location block extracted from a recycling_help request. The
+ *  model emits this only when the sender actually stated a place; we never
+ *  guess from area code, email domain, or signature. Code looks up the
+ *  city-page URL from this — the model must NEVER emit a recycleoldtech.com
+ *  URL itself (hallucinated paths 404 and kill the lead). */
+export interface ClassifyLocation {
+  city: string | null;
+  state: string | null;
+  zip: string | null;
+}
+
 export interface ClassifyResult {
   category: GeminiCategory;
   should_reply: boolean;
   draft_reply: string;
   reason: string;
+  /** Present only for recycling_help. Null otherwise. The model may omit
+   *  it even for recycling_help (e.g. no location stated); code falls back
+   *  to template D. */
+  location?: ClassifyLocation | null;
+  /** Free-text item list from the sender ("TVs", "old computers"). Nice-to-
+   *  have for reporting; not used to drive routing. */
+  items?: string[] | null;
+  /** Help-type vocabulary mirrored from RecyclingRequestForm.astro
+   *  (drop off / schedule pickup / business cleanout / data destruction /
+   *  sell-buy). Optional, for reporting parity with real form submissions. */
+  help_type?: string | null;
+  /** The human's name as stated in the email body. Needed because the From
+   *  display name is useless for form submissions — Web3Forms sends
+   *  `From: "Notifications" <notify@web3forms.com>` with the real name in
+   *  the body ("name : Fred Buczynski"), so greeting off the header would
+   *  address the sender as "Hi Notifications". Null when not stated. */
+  sender_name?: string | null;
   /** Raw model output, kept for diagnostics on parse failure. */
   raw?: string;
 }
@@ -47,6 +76,7 @@ export function resetGeminiClient(): void {
 // ---- Helpers --------------------------------------------------------------
 
 const VALID_CATEGORIES: ReadonlySet<string> = new Set<GeminiCategory>([
+  'recycling_help',
   'listing_request',
   'partner_inquiry',
   'support',
@@ -83,6 +113,10 @@ export function parseClassifyResult(raw: string): ClassifyResult {
       should_reply: false,
       draft_reply: '',
       reason: 'parse_failed: no JSON object found',
+      location: null,
+      items: null,
+      help_type: null,
+      sender_name: null,
       raw,
     };
   }
@@ -98,6 +132,10 @@ export function parseClassifyResult(raw: string): ClassifyResult {
       should_reply: false,
       draft_reply: '',
       reason: `parse_failed: ${e.message}`,
+      location: null,
+      items: null,
+      help_type: null,
+      sender_name: null,
       raw,
     };
   }
@@ -108,6 +146,10 @@ export function parseClassifyResult(raw: string): ClassifyResult {
       should_reply: false,
       draft_reply: '',
       reason: 'parse_failed: parsed is not an object',
+      location: null,
+      items: null,
+      help_type: null,
+      sender_name: null,
       raw,
     };
   }
@@ -121,7 +163,66 @@ export function parseClassifyResult(raw: string): ClassifyResult {
   const draft_reply = typeof obj.draft_reply === 'string' ? obj.draft_reply : '';
   const reason = typeof obj.reason === 'string' ? obj.reason : '';
 
-  return { category, should_reply, draft_reply, reason };
+  // Optional location/items/help_type — only meaningful for recycling_help,
+  // but tolerate them on any category (defensive parse). All three default
+  // to null when missing or malformed so downstream code can branch on
+  // null without a separate "was it present" check.
+  const location = parseLocation(obj.location);
+  const items = parseStringArray(obj.items);
+  const help_type = typeof obj.help_type === 'string' && obj.help_type.length > 0 ? obj.help_type : null;
+  const sender_name =
+    typeof obj.sender_name === 'string' && obj.sender_name.trim().length > 0
+      ? obj.sender_name.trim()
+      : null;
+
+  return { category, should_reply, draft_reply, reason, location, items, help_type, sender_name };
+}
+
+/** Parse the optional `location` block into a ClassifyLocation, tolerating
+ *  missing/garbage values. Never throws. */
+function parseLocation(raw: unknown): ClassifyLocation | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const obj = raw as Record<string, unknown>;
+  const city = typeof obj.city === 'string' && obj.city.length > 0 ? obj.city.trim() : null;
+  const state = typeof obj.state === 'string' && obj.state.length > 0 ? obj.state.trim() : null;
+  const zip = typeof obj.zip === 'string' && obj.zip.length > 0 ? obj.zip.trim() : null;
+  if (city === null && state === null && zip === null) return null;
+  return { city, state, zip };
+}
+
+/** Parse an optional string array, tolerating non-array / non-string
+ *  elements. Returns null when absent or empty. */
+function parseStringArray(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: string[] = [];
+  for (const el of raw) {
+    if (typeof el === 'string' && el.length > 0) out.push(el.trim());
+  }
+  return out.length > 0 ? out : null;
+}
+
+/**
+ * Whether a thrown error from the Gemini SDK is worth retrying. The SDK
+ * throws `ApiError` with a numeric `status` field (HTTP status code).
+ * Retry on 5xx (server error, transient) and 429 (rate limit). Do NOT
+ * retry 4xx (including 404 for a retired model id — that needs a prompt
+ * + env update, not a retry) — surface those as error rows immediately
+ * so the Phase 9 alert fires.
+ */
+function isRetryableGeminiError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { status?: unknown; statusCode?: unknown; message?: string };
+  const status =
+    typeof e.status === 'number' ? e.status :
+    typeof e.statusCode === 'number' ? e.statusCode :
+    undefined;
+  if (status === undefined) {
+    // Fall back to message sniffing for SDK wrappers that don't surface
+    // a numeric status (e.g. fetch-level errors with "429" in the body).
+    const msg = typeof e.message === 'string' ? e.message : '';
+    return /\b5\d\d\b|\b429\b/.test(msg);
+  }
+  return (status >= 500 && status < 600) || status === 429;
 }
 
 // ---- Public API -----------------------------------------------------------
@@ -129,6 +230,13 @@ export function parseClassifyResult(raw: string): ClassifyResult {
 /**
  * Single-call classify + draft per plan §9. Calls GEMINI_MODEL with JSON
  * mode and parses the result defensively.
+ *
+ * SPEC §3.9: one retry with jittered backoff on 5xx/429. A transient
+ * Gemini outage or a model retirement (404) used to make the message an
+ * unrecoverable `error` row — the cursor passed it via dedupe but nothing
+ * ever retried it. The retry covers the common 5xx/429 case; a 404 on a
+ * retired model id still throws (and lands as an error row + Phase 9
+ * alert so Adam can update GEMINI_MODEL).
  *
  * Phase 9 will split this into a classify call (GEMINI_CLASSIFY_MODEL,
  * flash-lite) and a draft call (GEMINI_MODEL, only when should_reply is
@@ -140,19 +248,36 @@ export async function classifyAndDraft(msg: ClassifyInput): Promise<ClassifyResu
   const client = getClient();
   const contents = buildUserContent(msg);
 
-  const response = await client.models.generateContent({
-    model: env.GEMINI_MODEL,
-    contents,
-    config: {
-      // SYSTEM_PROMPT (instructions only) goes via systemInstruction;
-      // `contents` carries just the email fields from buildUserContent.
-      // Keeping these separate avoids sending the (large) instruction
-      // block twice per call.
-      systemInstruction: SYSTEM_PROMPT,
-      responseMimeType: 'application/json',
-      temperature: 0.2, // deterministic-leaning for classification
-    },
-  });
+  const config = {
+    // SYSTEM_PROMPT (instructions only) goes via systemInstruction;
+    // `contents` carries just the email fields from buildUserContent.
+    // Keeping these separate avoids sending the (large) instruction
+    // block twice per call.
+    systemInstruction: SYSTEM_PROMPT,
+    responseMimeType: 'application/json' as const,
+    temperature: 0.2, // deterministic-leaning for classification
+  };
+
+  let response;
+  try {
+    response = await client.models.generateContent({
+      model: env.GEMINI_MODEL,
+      contents,
+      config,
+    });
+  } catch (err) {
+    // SPEC §3.9: one retry with jittered backoff on 5xx/429. 404 (retired
+    // model) and other 4xx are NOT retried — they'll fail the same way
+    // again and should surface as an error row + alert immediately.
+    if (!isRetryableGeminiError(err)) throw err;
+    const backoff = 800 + Math.random() * 1200; // 0.8-2.0s, jittered
+    await new Promise((r) => setTimeout(r, backoff));
+    response = await client.models.generateContent({
+      model: env.GEMINI_MODEL,
+      contents,
+      config,
+    });
+  }
 
   const text = (typeof response.text === 'string' ? response.text : '') ?? '';
   if (text.length === 0) {
@@ -161,6 +286,10 @@ export async function classifyAndDraft(msg: ClassifyInput): Promise<ClassifyResu
       should_reply: false,
       draft_reply: '',
       reason: 'gemini returned empty text',
+      location: null,
+      items: null,
+      help_type: null,
+      sender_name: null,
       raw: '',
     };
   }

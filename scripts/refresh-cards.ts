@@ -43,12 +43,14 @@ async function main() {
       id: emailQueue.id,
       fromAddr: emailQueue.fromAddr,
       fromName: emailQueue.fromName,
+      replyTo: emailQueue.replyTo,
       subject: emailQueue.subject,
       category: emailQueue.category,
       draftReply: emailQueue.draftReply,
       bodySnippet: emailQueue.bodySnippet,
       receivedAt: emailQueue.receivedAt,
       discordMessageId: emailQueue.discordMessageId,
+      routingLabel: emailQueue.routingLabel,
     })
     .from(emailQueue)
     .where(and(eq(emailQueue.status, 'pending'), isNotNull(emailQueue.discordMessageId)));
@@ -83,11 +85,13 @@ async function main() {
         id: r.id,
         fromAddr: r.fromAddr,
         fromName: r.fromName,
+        replyTo: r.replyTo,
         subject: r.subject,
         category: r.category,
         draftReply: r.draftReply,
         bodySnippet: r.bodySnippet,
         receivedAt: r.receivedAt,
+        routing: r.routingLabel,
       });
       await editCardWithRetry(DISCORD_CHANNEL_ID, r.discordMessageId as string, payload);
       console.log(`  refreshed: ${r.id} -> msg ${r.discordMessageId}`);

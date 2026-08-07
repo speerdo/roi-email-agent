@@ -9,11 +9,12 @@
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { waitUntil } from '@vercel/functions';
-import { eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { getDb } from '../lib/db.js';
 import { emailQueue } from '../db/schema.js';
 import { sendReply } from '../lib/smtp.js';
 import { withImap, markSeen } from '../lib/imap.js';
+import { replyRecipient } from '../lib/mail/recipient.js';
 import {
   verifyInteraction,
   parseCustomId,
@@ -185,11 +186,13 @@ function rowToCardRow(row: typeof emailQueue.$inferSelect): CardRow {
     id: row.id,
     fromAddr: row.fromAddr,
     fromName: row.fromName,
+    replyTo: row.replyTo,
     subject: row.subject,
     category: row.category,
     draftReply: row.draftReply,
     bodySnippet: row.bodySnippet,
     receivedAt: row.receivedAt,
+    routing: row.routingLabel,
   };
 }
 
@@ -212,28 +215,90 @@ async function handleApprove(i: AnyInteraction, queueId: string, res: VercelResp
 }
 
 async function doApproveWork(queueId: string, i: AnyInteraction): Promise<void> {
+  const db = getDb();
+  const channelId = i.message?.channel_id ?? getDiscordEnv().DISCORD_CHANNEL_ID;
+
+  // Idempotency claim (SPEC §3.4): a double-tap on Approve (or a Discord
+  // interaction retry) used to send the reply twice because the buttons
+  // stay on the card for several seconds until the waitUntil work finishes
+  // editing it. We atomically transition pending|error -> sending and
+  // treat "no row updated" as "already handled by a prior tap". This also
+  // makes a stuck 'sending' row detectable (it never existed before).
+  let claimed: { id: string }[] = [];
+  try {
+    claimed = await db
+      .update(emailQueue)
+      .set({ status: 'sending', updatedAt: new Date() })
+      .where(and(eq(emailQueue.id, queueId), inArray(emailQueue.status, ['pending', 'error'])))
+      .returning({ id: emailQueue.id });
+  } catch (err) {
+    const e = err as Error;
+    console.error(`[discord] approve claim failed for ${queueId}:`, e.message);
+    // Can't safely proceed — bail without touching SMTP. Leave the card
+    // as-is so Adam can retry.
+    return;
+  }
+  if (claimed.length === 0) {
+    console.log(`[discord] approve: row ${queueId} already handled (status no longer pending/error), skipping`);
+    return;
+  }
+
+  // Re-load the row AFTER claiming so we read the post-claim state.
   const row = await loadRowForCard(queueId);
   if (!row) {
-    console.error(`[discord] approve: row ${queueId} not found`);
+    console.error(`[discord] approve: row ${queueId} vanished after claim`);
     return;
   }
   if (!row.draftReply) {
     console.error(`[discord] approve: row ${queueId} has no draft`);
+    // Revert the claim so the row stays retryable.
+    await db
+      .update(emailQueue)
+      .set({ status: 'error', errorDetail: 'approve: no draft to send', updatedAt: new Date() })
+      .where(eq(emailQueue.id, queueId));
     return;
   }
 
-  const db = getDb();
-  const channelId = i.message?.channel_id ?? getDiscordEnv().DISCORD_CHANNEL_ID;
   const cardRow = rowToCardRow(row);
 
   // Send the reply via SMTP.
   try {
+    // Resolve the actual reply target. Web3Forms submissions carry
+    // From=notify@web3forms.com with Reply-To=<the real submitter>; without
+    // this, every approved reply to a form submission would go to the
+    // notification bot. replyRecipient returns null when neither From nor
+    // Reply-To is a safe reply target (noreply / MAILER-DAEMON / our own
+    // mailbox); refuse to send in that case rather than mailing the void.
+    const recipient = replyRecipient({ replyTo: row.replyTo, fromAddr: row.fromAddr });
+    if (!recipient) {
+      const reason = `no safe reply target (from=${row.fromAddr}, replyTo=${row.replyTo ?? 'null'})`;
+      console.error(`[discord] approve: ${reason} for ${queueId}`);
+      await db
+        .update(emailQueue)
+        .set({
+          status: 'error',
+          errorDetail: `approve refused: ${reason}`,
+          discordMessageId: i.message?.id ?? row.discordMessageId,
+          updatedAt: new Date(),
+        })
+        .where(eq(emailQueue.id, queueId));
+      await editCard(channelId, i.message?.id ?? '', {
+        embeds: [{
+          title: row.subject ?? '(no subject)',
+          description: `⚠️ Not sent: ${reason}`,
+          color: 0xb91c1c,
+        }],
+        components: [],
+      });
+      return;
+    }
+
     const send = await sendReply({
-      to: row.fromAddr,
+      to: recipient.to,
       subject: row.subject ?? '(no subject)',
       text: row.draftReply,
-      inReplyTo: row.inReplyTo ?? undefined,
-      references: row.emailReferences ?? undefined,
+      inboundMessageId: row.messageId,
+      inboundReferences: row.emailReferences ?? undefined,
     });
 
     // Mark the inbound read (real email marked read ONLY here, per plan).
@@ -258,7 +323,8 @@ async function doApproveWork(queueId: string, i: AnyInteraction): Promise<void> 
   } catch (err) {
     const e = err as Error;
     console.error(`[discord] approve failed for ${queueId}:`, e.message);
-    // Record on the row.
+    // Revert 'sending' -> 'error' so the row stays retryable and the
+    // buttons can remain (matching today's "keep the buttons" behaviour).
     await db
       .update(emailQueue)
       .set({
@@ -340,6 +406,7 @@ async function handleEdit(i: AnyInteraction, queueId: string, res: VercelRespons
     res.status(400).json({ error: 'row not found' });
     return;
   }
+  const cardRow = rowToCardRow(row);
 
   // Respond with the modal directly via the InteractionResponse route.
   // discord-interactions' openEditModal POSTs to /interactions/{id}/{token}/callback,
@@ -347,7 +414,21 @@ async function handleEdit(i: AnyInteraction, queueId: string, res: VercelRespons
   // response on THIS request, not a follow-up. So instead of calling
   // openEditModal (which fires a separate POST), we return the modal
   // payload as the response to this request.
-  const cardRow = rowToCardRow(row);
+  //
+  // SPEC §3.10: Discord TEXT_INPUT values are capped at 4000 chars.
+  // Truncate the prefilled draft to fit, with a logged warning when we
+  // do — a draft over 4000 chars would otherwise make Discord reject the
+  // modal and Adam sees only "This interaction failed."
+  const MAX_MODAL_VALUE = 4000;
+  const prefill = cardRow.draftReply ?? '';
+  const truncated = prefill.length > MAX_MODAL_VALUE
+    ? prefill.slice(0, MAX_MODAL_VALUE)
+    : prefill;
+  if (prefill.length > MAX_MODAL_VALUE) {
+    console.warn(
+      `[discord] edit modal: truncating draft (${prefill.length} chars) to Discord's ${MAX_MODAL_VALUE}-char TEXT_INPUT cap for row ${queueId}`,
+    );
+  }
   res.status(200).json({
     type: 9, // MODAL
     data: {
@@ -362,8 +443,9 @@ async function handleEdit(i: AnyInteraction, queueId: string, res: VercelRespons
               style: 2, // PARAGRAPH
               label: 'Draft reply (will be sent verbatim)',
               custom_id: 'draft_text',
-              value: cardRow.draftReply ?? '',
+              value: truncated,
               required: true,
+              max_length: MAX_MODAL_VALUE,
             },
           ],
         },
@@ -388,9 +470,33 @@ async function handleEditSubmit(i: AnyInteraction, queueId: string, res: VercelR
 }
 
 async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<void> {
+  const db = getDb();
+  const channelId = i.message?.channel_id ?? getDiscordEnv().DISCORD_CHANNEL_ID;
+
+  // Idempotency claim (SPEC §3.4) — same pattern as doApproveWork: a
+  // double-tap on the modal submit (or a Discord retry) must not send
+  // twice. Atomically transition pending|error -> sending; no-op if the
+  // row is no longer in a claimable state.
+  let claimed: { id: string }[] = [];
+  try {
+    claimed = await db
+      .update(emailQueue)
+      .set({ status: 'sending', updatedAt: new Date() })
+      .where(and(eq(emailQueue.id, queueId), inArray(emailQueue.status, ['pending', 'error'])))
+      .returning({ id: emailQueue.id });
+  } catch (err) {
+    const e = err as Error;
+    console.error(`[discord] edit_submit claim failed for ${queueId}:`, e.message);
+    return;
+  }
+  if (claimed.length === 0) {
+    console.log(`[discord] edit_submit: row ${queueId} already handled, skipping`);
+    return;
+  }
+
   const row = await loadRowForCard(queueId);
   if (!row) {
-    console.error(`[discord] edit_submit: row ${queueId} not found`);
+    console.error(`[discord] edit_submit: row ${queueId} vanished after claim`);
     return;
   }
 
@@ -398,11 +504,13 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
   const submitted = extractModalValue(i.data?.components, 'draft_text');
   if (!submitted) {
     console.error(`[discord] edit_submit: no draft_text in modal for ${queueId}`);
+    // Revert the claim so the row stays retryable.
+    await db
+      .update(emailQueue)
+      .set({ status: 'error', errorDetail: 'edit_submit: no draft_text in modal', updatedAt: new Date() })
+      .where(eq(emailQueue.id, queueId));
     return;
   }
-
-  const db = getDb();
-  const channelId = i.message?.channel_id ?? getDiscordEnv().DISCORD_CHANNEL_ID;
 
   // Update the row's draft_reply with the edited text.
   await db
@@ -414,21 +522,46 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
     id: row.id,
     fromAddr: row.fromAddr,
     fromName: row.fromName,
+    replyTo: row.replyTo,
     subject: row.subject,
     category: row.category,
     draftReply: submitted,
     bodySnippet: row.bodySnippet,
     receivedAt: row.receivedAt,
+    routing: row.routingLabel,
   };
 
   // Send the edited reply.
   try {
+    const recipient = replyRecipient({ replyTo: row.replyTo, fromAddr: row.fromAddr });
+    if (!recipient) {
+      const reason = `no safe reply target (from=${row.fromAddr}, replyTo=${row.replyTo ?? 'null'})`;
+      console.error(`[discord] edit_submit: ${reason} for ${queueId}`);
+      await db
+        .update(emailQueue)
+        .set({
+          status: 'error',
+          errorDetail: `edit_submit refused: ${reason}`,
+          updatedAt: new Date(),
+        })
+        .where(eq(emailQueue.id, queueId));
+      await editCard(channelId, i.message?.id ?? '', {
+        embeds: [{
+          title: row.subject ?? '(no subject)',
+          description: `⚠️ Not sent: ${reason}`,
+          color: 0xb91c1c,
+        }],
+        components: [],
+      });
+      return;
+    }
+
     const send = await sendReply({
-      to: row.fromAddr,
+      to: recipient.to,
       subject: row.subject ?? '(no subject)',
       text: submitted,
-      inReplyTo: row.inReplyTo ?? undefined,
-      references: row.emailReferences ?? undefined,
+      inboundMessageId: row.messageId,
+      inboundReferences: row.emailReferences ?? undefined,
     });
 
     if (row.imapUid !== null) {
@@ -452,6 +585,7 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
   } catch (err) {
     const e = err as Error;
     console.error(`[discord] edit_submit send failed for ${queueId}:`, e.message);
+    // Revert 'sending' -> 'error' so the row stays retryable.
     await db
       .update(emailQueue)
       .set({

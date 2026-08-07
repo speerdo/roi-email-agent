@@ -33,6 +33,13 @@ export interface Env {
   DMARC_SUBJECTS: string;
   DMARC_FROM: string;
   DMARC_MARK_READ: boolean;
+  // Spam and "other" (non-reply-worthy, non-pre-filter) categories are
+  // marked read when these are true. Default true so the inbox unread
+  // badge reflects only genuinely-open work (pending cards + error rows).
+  // Set to false to keep either bucket visible in webmail as a safety net.
+  // See docs/SPEC_TRIAGE_FIXES.md §1.4.
+  SPAM_MARK_READ: boolean;
+  OTHER_MARK_READ: boolean;
 }
 
 export interface DiscordEnv {
@@ -98,6 +105,8 @@ export function getEnv(): Env {
     DMARC_SUBJECTS: required('DMARC_SUBJECTS'),
     DMARC_FROM: process.env.DMARC_FROM ?? '',
     DMARC_MARK_READ: boolFlag('DMARC_MARK_READ', true),
+    SPAM_MARK_READ: boolFlag('SPAM_MARK_READ', true),
+    OTHER_MARK_READ: boolFlag('OTHER_MARK_READ', true),
   };
   return cached;
 }

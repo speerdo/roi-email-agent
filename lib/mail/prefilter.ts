@@ -3,7 +3,7 @@ import type { ParsedFrom } from './clean.js';
 
 // ---- Types ----------------------------------------------------------------
 
-export type PrefilterCategory = 'recycling_request' | 'newsletter' | 'dmarc';
+export type PrefilterCategory = 'recycling_request' | 'newsletter' | 'dmarc' | 'bounce';
 
 export interface PrefilterMatch {
   matched: true;
@@ -34,6 +34,13 @@ interface FilterConfig {
 
 let configCache: FilterConfig | null = null;
 
+// NOTE on caching: configCache is process-lifetime. On Vercel Fluid
+// Compute a warm instance keeps stale pre-filter env after an env var
+// change until the instance recycles. Acceptable for the pre-filter
+// (config changes are rare and a stale match/no-match is at worst a
+// misrouted single message), but worth knowing when debugging a "why
+// didn't the new NEWSLETTER_FROM take effect" report. resetPrefilterConfig()
+// is the test-only escape hatch.
 function loadConfig(): FilterConfig {
   if (configCache) return configCache;
   // NOTE: we read pre-filter env vars directly via process.env rather than
@@ -104,16 +111,41 @@ export function matchDmarc(subject: string, fromAddress: string): boolean {
   return true;
 }
 
+/**
+ * Bounce / delivery-status notification (RFC 3464). Either the From
+ * address starts with MAILER-DAEMON@ (the conventional DSN sender) OR
+ * the Content-Type is multipart/report with report-type=delivery-status.
+ * Both signals are deterministic — no LLM call needed. Bounces are
+ * marked read + skipped, and surfaced via a weekly digest so address
+ * typos in the recycling form (e.g. ".ccom") and any deliverability
+ * problem with our own domain don't sit invisible forever.
+ */
+export function matchBounce(fromAddress: string, contentType?: string): boolean {
+  const from = fromAddress.toLowerCase();
+  if (from.startsWith('mailer-daemon@') || from.startsWith('postmaster@')) return true;
+  if (contentType) {
+    const ct = contentType.toLowerCase();
+    if (ct.includes('multipart/report') && ct.includes('report-type=delivery-status')) return true;
+  }
+  return false;
+}
+
 // ---- Driver ---------------------------------------------------------------
 
 export interface PrefilterInput {
   subject: string;
   from: ParsedFrom | { address: string };
+  /** Content-Type header of the inbound message, when available. Used by
+   *  the bounce pre-filter to detect multipart/report delivery-status
+   *  notifications (RFC 3464) that don't always carry a recognizable
+   *  From address. Optional — older callers omit it and the bounce
+   *  filter falls back to the MAILER-DAEMON From check alone. */
+  contentType?: string;
 }
 
 /**
- * Run all pre-filters in plan order: recycling, newsletter, dmarc. Only
- * the FIRST match wins; everything else falls through to the LLM.
+ * Run all pre-filters in plan order: recycling, newsletter, dmarc, bounce.
+ * Only the FIRST match wins; everything else falls through to the LLM.
  */
 export function runPrefilters(msg: PrefilterInput): PrefilterResult {
   const subject = msg.subject ?? '';
@@ -144,6 +176,18 @@ export function runPrefilters(msg: PrefilterInput): PrefilterResult {
       category: 'dmarc',
       skipReason: 'dmarc_report',
       markRead: cfg.dmarcMarkRead,
+    };
+  }
+
+  if (matchBounce(fromAddress, msg.contentType)) {
+    return {
+      matched: true,
+      category: 'bounce',
+      skipReason: 'bounce',
+      // Always mark bounces read — they're never reply-worthy and leaving
+      // them unread pollutes the inbox badge. The weekly digest script
+      // surfaces their content separately.
+      markRead: true,
     };
   }
 

@@ -22,7 +22,9 @@ import { emailQueue, emailSyncState } from '../../db/schema.js';
 import { cleanBody } from '../mail/clean.js';
 import { runPrefilters } from '../mail/prefilter.js';
 import { classifyAndDraft, type ClassifyResult } from '../gemini/index.js';
-import { markSeen } from '../imap.js';
+import { getEnv } from '../env.js';
+import { resolveCityPage } from '../site/resolveCityPage.js';
+import { renderRecyclingHelp, greetingName } from '../mail/templates/recyclingHelp.js';
 import {
   type RunSummary,
   newRunSummary,
@@ -67,10 +69,16 @@ export interface RoutingContext {
   /** Full row fields needed to build a Discord card. Available since Phase 6. */
   fromAddr: string;
   fromName: string | undefined;
+  replyTo: string | undefined;
   subject: string | undefined;
   receivedAt: Date;
   /** Cleaned original-email snippet, shown on the card alongside the draft. */
   bodySnippet: string;
+  /** Human-readable routing hint for recycling_help (e.g.
+   *  "Greencastle, PA -> /states/pennsylvania/greencastle"). Empty for
+   *  non-recycling_help categories. Shown on the card so a reviewer can
+   *  catch a bad city resolution BEFORE approving. */
+  routing: string;
 }
 
 /**
@@ -85,24 +93,32 @@ export type RoutingPolicy = (ctx: RoutingContext) => RoutingDecision;
 
 /**
  * Phase 5 incremental policy. Reply-worthy non-spam -> pending + would-post
- * card log; spam -> skipped + NO read (stays visible); everything else ->
- * skipped, no card. Cards themselves are wired in Phase 6.
+ * card log; spam -> skipped + markRead per SPAM_MARK_READ (default true so
+ * the inbox unread badge reflects only open work); everything else ->
+ * skipped, markRead per OTHER_MARK_READ, no card. Cards themselves are
+ * wired in Phase 6.
+ *
+ * Steady-state target (SPEC §1.4): unread count == open Discord cards +
+ * error rows. Setting SPAM_MARK_READ=false or OTHER_MARK_READ=false
+ * reintroduces a "safety net" of visible unread in webmail at the cost of
+ * a noisy unread badge.
  */
 export const incrementalPolicy: RoutingPolicy = (ctx) => {
+  const env = getEnv();
   if (ctx.shouldReply && ctx.category !== 'spam') {
     return { status: 'pending', markRead: false, cardAction: 'post' };
   }
   if (ctx.category === 'spam') {
     return {
       status: 'skipped',
-      markRead: false,        // safety net: keep spam visible in webmail
+      markRead: env.SPAM_MARK_READ,
       cardAction: 'skip',
       skipReason: 'spam',
     };
   }
   return {
     status: 'skipped',
-    markRead: false,
+    markRead: env.OTHER_MARK_READ,
     cardAction: 'skip',
     skipReason: `category:${ctx.category}:no_reply`,
   };
@@ -116,6 +132,13 @@ export interface ProcessMessageResult {
   rowId?: string;
   category?: string;
   shouldReply?: boolean;
+  /** True when the routing decision / pre-filter said to mark this
+   *  message \\Seen. The runner collects these UIDs and the caller
+   *  flushes them via markSeenBatch AFTER the fetch generator completes
+   *  and the read-only mailbox lock is released. Never call markSeen
+   *  inline from processMessage — that nests locks on the same client
+   *  and deadlocks (see lib/imap.ts markSeen doc + SPEC §1.2). */
+  markRead?: boolean;
 }
 
 /**
@@ -129,9 +152,15 @@ export interface ProcessMessageResult {
  * past a message whose row insert failed (the caller handles that by only
  * updating last_uid on `status: 'inserted' | 'duplicate'`).
  *
- * Note on `client`: an open ImapFlow connection. We re-enter read/write locks
- * per-operation inside markSeen; reusing one connection across UIDs is fine
- * since getMailboxLock is per-call.
+ * Note on `client`: an open ImapFlow connection. We DO NOT acquire any
+ * mailbox lock in this module — the caller (api/poll.ts) owns the fetch
+ * generator whose read-only lock is held for the lifetime of the loop.
+ * processMessage must never call markSeen/markSeenBatch on `client`
+ * directly: doing so nests a write lock inside the fetch lock on the
+ * same connection and deadlocks (ImapFlow locks are a strict
+ * per-connection mutex — see lib/imap.ts markSeen doc + SPEC §1.2).
+ * Instead we return `markRead` on ProcessMessageResult and let
+ * runBatch's caller flush via markSeenBatch after the generator exhausts.
  *
  * Note on Message-ID presence: a message without a Message-ID is rare but
  * possible (some automated senders skip it). We still need to dedupe, so
@@ -175,10 +204,50 @@ export async function processMessage(
     return { status: 'error', uid: msg.uid };
   }
 
+  // 1b. Unparseable message (SPEC §3.5). The fetch generator yields a
+  // degraded FetchedMessage with parseError set rather than throwing,
+  // because a throw from inside the generator escapes runBatch's
+  // for-await entirely (its try/catch only wraps processMessage) and
+  // leaves no row — which pins the cursor and stalls every later poll on
+  // the same message. Record an error row so the cursor CAN advance;
+  // scripts/retry-errors.ts can pick it up later.
+  if (msg.parseError) {
+    const rowId = await insertRow({
+      messageId,
+      imapUid: msg.uid,
+      fromAddr: msg.fromAddr || '(unparseable)',
+      fromName: msg.fromName,
+      replyTo: msg.replyTo,
+      subject: msg.subject,
+      bodySnippet: '(unparseable message)',
+      category: null,
+      shouldReply: false,
+      draftReply: null,
+      status: 'error',
+      skipReason: null,
+      errorDetail: `parse failed: ${msg.parseError}`,
+      receivedAt: msg.receivedAt,
+    });
+    recordError(summary, {
+      uid: msg.uid,
+      messageId,
+      stage: 'parse',
+      message: msg.parseError,
+    });
+    bumpStatus(summary, 'error');
+    // 'inserted' (not 'error') on purpose: the row is in the DB, so the
+    // cursor may advance past this UID. Returning 'error' here would
+    // recreate the head-of-line block this branch exists to prevent.
+    return rowId === null
+      ? { status: 'error', uid: msg.uid }
+      : { status: 'inserted', uid: msg.uid, rowId, shouldReply: false, markRead: false };
+  }
+
   // 2. Pre-filters (deterministic, no LLM call).
   const pre = runPrefilters({
     subject: msg.subject ?? '',
     from: { address: msg.fromAddr, name: msg.fromName },
+    contentType: msg.contentType,
   });
 
   if (pre.matched) {
@@ -187,6 +256,7 @@ export async function processMessage(
       imapUid: msg.uid,
       fromAddr: msg.fromAddr,
       fromName: msg.fromName,
+      replyTo: msg.replyTo,
       subject: msg.subject,
       bodySnippet: snippet,
       category: pre.category,
@@ -207,22 +277,35 @@ export async function processMessage(
     bumpSkipReason(summary, pre.skipReason);
     bumpStatus(summary, 'skipped');
 
-    if (pre.markRead) {
-      try {
-        await markSeen(client, mailbox, msg.uid);
-      } catch (err) {
-        const e = err as Error;
-        recordError(summary, {
-          uid: msg.uid,
-          messageId,
-          stage: 'markseen',
-          message: `pre-filter markSeen failed: ${e.message}`,
-        });
-        // Don't fail the whole message over a flag flip; the row is already
-        // 'skipped' and the cursor can advance.
-      }
-    }
-    return { status: 'inserted', uid: msg.uid, rowId, category: pre.category, shouldReply: false };
+    // NOTE: do NOT call markSeen here. The fetch generator still holds
+    // the read-only mailbox lock on this client; a nested write lock
+    // deadlocks (see lib/imap.ts markSeen doc). Return the flag and let
+    // runBatch's caller flush via markSeenBatch after the generator
+    // completes.
+    return {
+      status: 'inserted',
+      uid: msg.uid,
+      rowId,
+      category: pre.category,
+      shouldReply: false,
+      markRead: pre.markRead,
+    };
+  }
+
+  // SPEC §3.11 filter-drift detection: a Web3Forms message whose subject
+  // looks like a recycling request did NOT match the recycling pre-filter.
+  // Usually means the form's subject template changed and 300+ form
+  // submissions/yr are about to start hitting Gemini + generating cards.
+  // Scope to "subject looks like a recycling request" so the legitimate
+  // contact-form mail (which also comes from notify@web3forms.com) doesn't
+  // trip the warning.
+  if (
+    msg.fromAddr.toLowerCase().includes('notify@web3forms.com') &&
+    /^recycling request from/i.test(msg.subject ?? '')
+  ) {
+    const drift = `filter drift: uid=${msg.uid} from web3forms with recycling-shaped subject "${(msg.subject ?? '').slice(0, 80)}" did NOT match the recycling pre-filter — check AUTOMATED_FORM_SUBJECTS`;
+    summary.filterDriftWarnings.push(drift);
+    console.warn(`[poll] ${drift}`);
   }
 
   // 3. Gemini classify + draft.
@@ -248,6 +331,7 @@ export async function processMessage(
       imapUid: msg.uid,
       fromAddr: msg.fromAddr,
       fromName: msg.fromName,
+      replyTo: msg.replyTo,
       subject: msg.subject,
       bodySnippet: snippet,
       category: null,
@@ -265,21 +349,51 @@ export async function processMessage(
   }
 
   // 4. Insert the row as pending, then apply routing.
+  //
+  // recycling_help override (SPEC §2.5-2.7): the LLM is barred from
+  // emitting a recycleoldtech.com URL for this category (a hallucinated
+  // path 404s and the lead is dead). It outputs structured location
+  // fields; code resolves the URL deterministically from the site index
+  // and composes the reply from a fixed template. The model's draft is
+  // discarded; the routing label is persisted for the card + audit.
+  let draftReply = classify.draft_reply || null;
+  let routingLabel = '';
+  let locationHint: unknown = null;
+  let resolvedCityUrl: string | null = null;
+  if (classify.category === 'recycling_help' && classify.should_reply) {
+    const resolved = resolveCityPage(classify.location ?? null);
+    draftReply = renderRecyclingHelp({
+      // Prefer the name stated in the body over the From display name:
+      // Web3Forms sends `From: "Notifications" <notify@web3forms.com>`, so
+      // the header alone would greet the sender as "Hi Notifications".
+      firstName: greetingName(classify.sender_name, msg.fromName),
+      resolved,
+      location: classify.location ?? null,
+    });
+    routingLabel = resolved.routingLabel;
+    locationHint = classify.location ?? null;
+    resolvedCityUrl = resolved.url;
+  }
+
   const rowId = await insertRow({
     messageId,
     imapUid: msg.uid,
     fromAddr: msg.fromAddr,
     fromName: msg.fromName,
+    replyTo: msg.replyTo,
     subject: msg.subject,
     bodySnippet: snippet,
     category: classify.category,
     shouldReply: classify.should_reply,
-    draftReply: classify.draft_reply || null,
+    draftReply,
     status: 'pending',
     skipReason: null,
     inReplyTo: msg.inReplyTo,
     emailReferences: msg.references,
     receivedAt: msg.receivedAt,
+    locationHint,
+    resolvedCityUrl,
+    routingLabel: routingLabel || null,
   });
 
   if (rowId === null) {
@@ -295,12 +409,14 @@ export async function processMessage(
     imapUid: msg.uid,
     category: classify.category,
     shouldReply: classify.should_reply,
-    draftReply: classify.draft_reply,
+    draftReply: draftReply ?? '',
     fromAddr: msg.fromAddr,
     fromName: msg.fromName,
+    replyTo: msg.replyTo,
     subject: msg.subject,
     receivedAt: msg.receivedAt,
     bodySnippet: snippet,
+    routing: routingLabel,
   });
 
   if (decision.status !== 'pending') {
@@ -335,12 +451,14 @@ export async function processMessage(
             imapUid: msg.uid,
             category: classify.category,
             shouldReply: classify.should_reply,
-            draftReply: classify.draft_reply,
+            draftReply: draftReply ?? '',
             fromAddr: msg.fromAddr,
             fromName: msg.fromName,
+            replyTo: msg.replyTo,
             subject: msg.subject,
             receivedAt: msg.receivedAt,
             bodySnippet: snippet,
+            routing: routingLabel,
           },
           rowId,
         );
@@ -361,17 +479,12 @@ export async function processMessage(
   }
 
   if (decision.markRead) {
-    try {
-      await markSeen(client, mailbox, msg.uid);
-    } catch (err) {
-      const e = err as Error;
-      recordError(summary, {
-        uid: msg.uid,
-        messageId,
-        stage: 'markseen',
-        message: `route markSeen failed: ${e.message}`,
-      });
-    }
+    // NOTE: deferred to runBatch's caller (api/poll.ts). Calling markSeen
+    // here would nest a write lock inside the fetch generator's read-only
+    // lock on the same client and deadlock — see lib/imap.ts markSeen doc
+    // and SPEC §1.2. We just record the flag; the caller batches all
+    // markRead UIDs into one markSeenBatch call after the generator is
+    // exhausted.
   }
 
   return {
@@ -380,6 +493,7 @@ export async function processMessage(
     rowId,
     category: classify.category,
     shouldReply: classify.should_reply,
+    markRead: decision.markRead,
   };
 }
 
@@ -390,6 +504,7 @@ interface InsertRowInput {
   imapUid: number;
   fromAddr: string;
   fromName?: string;
+  replyTo?: string;
   subject?: string;
   bodySnippet: string;
   category: string | null;
@@ -401,6 +516,10 @@ interface InsertRowInput {
   inReplyTo?: string;
   emailReferences?: string;
   receivedAt: Date;
+  /** recycling_help audit trail (SPEC §2.7). Null for non-recycling_help. */
+  locationHint?: unknown;
+  resolvedCityUrl?: string | null;
+  routingLabel?: string | null;
 }
 
 /**
@@ -417,6 +536,7 @@ async function insertRow(input: InsertRowInput): Promise<string | null> {
         imapUid: input.imapUid,
         fromAddr: input.fromAddr,
         fromName: input.fromName,
+        replyTo: input.replyTo,
         subject: input.subject,
         bodySnippet: input.bodySnippet,
         category: input.category,
@@ -428,6 +548,9 @@ async function insertRow(input: InsertRowInput): Promise<string | null> {
         inReplyTo: input.inReplyTo,
         emailReferences: input.emailReferences,
         receivedAt: input.receivedAt,
+        locationHint: input.locationHint === undefined ? null : input.locationHint,
+        resolvedCityUrl: input.resolvedCityUrl ?? null,
+        routingLabel: input.routingLabel ?? null,
       })
       .returning({ id: emailQueue.id });
     const row = inserted[0];
@@ -445,15 +568,21 @@ async function insertRow(input: InsertRowInput): Promise<string | null> {
 /**
  * Drives a batch of fetched messages through processMessage, returns the
  * highest UID successfully persisted (inserted OR duplicate — both mean
- * the row is in DB, so the cursor can advance). A UID whose row insert
- * failed is NOT in the returned max, so the caller leaves last_uid alone
- * and the next run retries it.
+ * the row is in DB, so the cursor can advance) plus the UIDs that should
+ * be flagged \\Seen. A UID whose row insert failed is NOT in the returned
+ * max, so the caller leaves last_uid alone and the next run retries it.
  *
  * `summary.highestPersistedUid` is updated on every iteration (not just at
  * the end) so a caller can still read out partial progress even if this
  * loop throws partway through (e.g. the IMAP connection dies on message 20
  * of 25) — the thrown exception propagates past this function's own
  * `return`, but the mutation already happened on the shared `summary`.
+ *
+ * The returned `seenUids` MUST be flushed via markSeenBatch AFTER the
+ * fetch generator has been fully consumed (i.e. after this function
+ * returns, when the read-only mailbox lock has been released). Calling
+ * markSeen/markSeenBatch on `client` while the generator's lock is still
+ * held deadlocks — see lib/imap.ts markSeen doc.
  */
 export async function runBatch(
   messages: AsyncIterableIterator<FetchedMessage>,
@@ -462,20 +591,86 @@ export async function runBatch(
   policy: RoutingPolicy,
   summary: RunSummary,
   cardPoster?: CardPoster,
-): Promise<{ highestPersistedUid: number | null }> {
+): Promise<{ highestPersistedUid: number | null; seenUids: number[] }> {
+  const seenUids: number[] = [];
   for await (const msg of messages) {
-    const result = await processMessage(msg, client, mailbox, policy, summary, cardPoster);
+    let result: ProcessMessageResult;
+    try {
+      result = await processMessage(msg, client, mailbox, policy, summary, cardPoster);
+    } catch (err) {
+      // Poison-message guard (SPEC §3.5), second layer. Parse failures are
+      // already handled upstream (lib/imap.ts yields a degraded message
+      // with parseError set, and processMessage writes an error row for
+      // it), so what reaches here is an unexpected throw from anywhere
+      // else in processMessage. Left unguarded it escapes the for-await,
+      // leaving no row for that UID: the cursor never advances past it, so
+      // every subsequent poll re-fetches the same message, throws again,
+      // and processes NOTHING — a permanent head-of-line block with no
+      // alert. Insert a minimal error row keyed on no-message-id:<uid> so
+      // the cursor CAN advance and the message is auditable in Neon.
+      const e = err as Error;
+      recordError(summary, {
+        uid: msg.uid,
+        stage: 'processMessage',
+        message: `unhandled throw: ${e.message}`,
+      });
+      try {
+        await insertRow({
+          messageId: `no-message-id:${msg.uid}`,
+          imapUid: msg.uid,
+          fromAddr: msg.fromAddr ?? '(unknown)',
+          fromName: msg.fromName,
+          replyTo: msg.replyTo,
+          subject: msg.subject,
+          bodySnippet: '(unparseable message)',
+          category: null,
+          shouldReply: false,
+          draftReply: null,
+          status: 'error',
+          skipReason: null,
+          errorDetail: `unhandled throw in processMessage: ${e.message}`,
+          inReplyTo: msg.inReplyTo,
+          emailReferences: msg.references,
+          receivedAt: msg.receivedAt,
+        });
+        bumpStatus(summary, 'error');
+        // 'inserted', not 'error': the row landed, so the cursor may move
+        // past this UID. Reporting 'error' here would hold the cursor and
+        // recreate the exact head-of-line block this guard exists to
+        // prevent.
+        result = { status: 'inserted', uid: msg.uid, markRead: false };
+      } catch (insertErr) {
+        // Last-resort: if even the error-row insert fails, record and
+        // treat as 'error' so we DO NOT advance the cursor (the message
+        // is genuinely unhandleable and re-fetching it is the only
+        // chance someone notices). This is the one case where a poison
+        // message can still block; the Phase 9 error alert surfaces it.
+        const ie = insertErr as Error;
+        recordError(summary, {
+          uid: msg.uid,
+          stage: 'processMessage-error-insert',
+          message: ie.message,
+        });
+        result = { status: 'error', uid: msg.uid };
+      }
+    }
 
     if (result.status === 'inserted' || result.status === 'duplicate') {
-      // Both mean "the row is in DB"; advance the cursor past them.
+      // Both mean "the row is in DB"; advance the cursor past them. An
+      // error row written by the poison guards above also reports
+      // 'inserted' for exactly this reason (see §3.5).
       if (summary.highestPersistedUid === null || msg.uid > summary.highestPersistedUid) {
         summary.highestPersistedUid = msg.uid;
       }
     }
-    // 'error' -> do not advance; next run retries this UID.
+    // 'error' without a row -> do not advance; next run retries this UID.
+
+    if (result.markRead === true && result.status !== 'error') {
+      seenUids.push(msg.uid);
+    }
   }
 
-  return { highestPersistedUid: summary.highestPersistedUid };
+  return { highestPersistedUid: summary.highestPersistedUid, seenUids };
 }
 
 // ---- Sync state helpers ---------------------------------------------------

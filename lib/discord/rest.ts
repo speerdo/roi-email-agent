@@ -11,6 +11,7 @@
 import { getDiscordEnv } from '../../types/env.js';
 import { buildCustomId } from './verify.js';
 import { InteractionResponseType, type InteractionType } from 'discord-interactions';
+import { recipientDisplay } from '../mail/recipient.js';
 
 // ---- Public types ---------------------------------------------------------
 
@@ -19,12 +20,19 @@ export interface CardRow {
   id: string;
   fromAddr: string;
   fromName: string | null;
+  /** Reply-To header (nullable). When present, replies go here instead of
+   *  fromAddr. Shown on the card so a reviewer can see the rerouting. */
+  replyTo: string | null;
   subject: string | null;
   category: string | null;
   draftReply: string | null;
   /** Cleaned original-email snippet (lib/mail/clean.ts), shown alongside the draft so a reviewer can judge alignment without leaving Discord. */
   bodySnippet: string | null;
   receivedAt: Date | null;
+  /** recycling_help routing hint (e.g. "Greencastle, PA -> /states/...").
+   *  Empty/null for non-recycling_help categories. Shown as a card field
+   *  so a reviewer can catch a bad city resolution BEFORE approving. */
+  routing: string | null;
 }
 
 export interface PostedCard {
@@ -92,22 +100,35 @@ export function codeBlock(text: string, maxLen: number, emptyPlaceholder: string
  * judge alignment without leaving Discord.
  */
 export function buildCardPayload(row: CardRow): Record<string, unknown> {
-  const fromLabel = row.fromName ? `${row.fromName} <${row.fromAddr}>` : row.fromAddr;
+  // Show the address an approved reply will actually go to. When Reply-To
+  // differs from From (e.g. Web3Forms), this renders as
+  // "submitter@example.com (via notify@web3forms.com)" so a reviewer can
+  // catch a mis-resolved recipient BEFORE approving. When replyRecipient()
+  // refuses (noreply / our own mailbox), render a clear marker instead.
+  const recipient = recipientDisplay({ replyTo: row.replyTo, fromAddr: row.fromAddr }, row.fromName);
+  const fromLabel = recipient ?? `⚠️ no reply target (from=${row.fromAddr})`;
   const draftBlock = codeBlock(row.draftReply ?? '', MAX_EMBED_DESCRIPTION, '*(no draft)*');
   const snippetBlock = codeBlock(row.bodySnippet ?? '', MAX_EMBED_FIELD_VALUE, '*(no content)*');
   const received = row.receivedAt instanceof Date
     ? row.receivedAt.toISOString()
     : '(unknown time)';
 
+  // Routing field is included only for recycling_help (where routing is
+  // non-empty). Omitting it for other categories keeps the card compact.
+  const fields: Array<{ name: string; value: string; inline: boolean }> = [
+    { name: 'Reply to', value: truncatePlain(fromLabel, MAX_EMBED_FIELD_VALUE), inline: false },
+    { name: 'Category', value: row.category ?? 'other', inline: true },
+    { name: 'Received', value: received, inline: true },
+  ];
+  if (row.routing) {
+    fields.push({ name: 'Routing', value: truncatePlain(row.routing, MAX_EMBED_FIELD_VALUE), inline: false });
+  }
+  fields.push({ name: 'Original email', value: snippetBlock, inline: false });
+
   const embed = {
     title: truncatePlain(row.subject ?? '(no subject)', MAX_EMBED_TITLE),
     description: draftBlock,
-    fields: [
-      { name: 'From', value: truncatePlain(fromLabel, MAX_EMBED_FIELD_VALUE), inline: false },
-      { name: 'Category', value: row.category ?? 'other', inline: true },
-      { name: 'Received', value: received, inline: true },
-      { name: 'Original email', value: snippetBlock, inline: false },
-    ],
+    fields,
     color: 0x4f46e5, // indigo, just so cards are visually distinct from chat
   };
 
@@ -153,20 +174,28 @@ export function buildResolvedCardPayload(row: CardRow, outcome: 'sent' | 'sent_e
     send_failed: '⚠️ Send failed — see logs',
   }[outcome];
 
-  const fromLabel = row.fromName ? `${row.fromName} <${row.fromAddr}>` : row.fromAddr;
+  const fromLabel = (() => {
+    const recipient = recipientDisplay({ replyTo: row.replyTo, fromAddr: row.fromAddr }, row.fromName);
+    return recipient ?? `⚠️ no reply target (from=${row.fromAddr})`;
+  })();
   // Reserve headroom for the outcome line + separator above the draft so
   // the combined description never exceeds MAX_EMBED_DESCRIPTION.
   const draftBlock = codeBlock(row.draftReply ?? '', MAX_EMBED_DESCRIPTION - 100, '*(no draft)*');
   const snippetBlock = codeBlock(row.bodySnippet ?? '', MAX_EMBED_FIELD_VALUE, '*(no content)*');
 
+  const fields: Array<{ name: string; value: string; inline: boolean }> = [
+    { name: 'Reply to', value: truncatePlain(fromLabel, MAX_EMBED_FIELD_VALUE), inline: false },
+    { name: 'Category', value: row.category ?? 'other', inline: true },
+  ];
+  if (row.routing) {
+    fields.push({ name: 'Routing', value: truncatePlain(row.routing, MAX_EMBED_FIELD_VALUE), inline: false });
+  }
+  fields.push({ name: 'Original email', value: snippetBlock, inline: false });
+
   const embed = {
     title: truncatePlain(row.subject ?? '(no subject)', MAX_EMBED_TITLE),
     description: `${outcomeText}\n\n${draftBlock}`,
-    fields: [
-      { name: 'From', value: truncatePlain(fromLabel, MAX_EMBED_FIELD_VALUE), inline: false },
-      { name: 'Category', value: row.category ?? 'other', inline: true },
-      { name: 'Original email', value: snippetBlock, inline: false },
-    ],
+    fields,
     color: outcome === 'send_failed' ? 0xb91c1c : 0x16a34a,
   };
 
@@ -204,8 +233,15 @@ export async function postCard(row: CardRow): Promise<PostedCard> {
 /**
  * PATCH an existing card (message) with a new payload. Used to flip a
  * card to "Sent" / "Skipped" / "Send failed" and remove its buttons.
+ *
+ * Guards against an empty `messageId` (SPEC §3.11): an empty id produces
+ * a confusing 404 from Discord (`/channels/{cid}/messages/`) that looks
+ * like a permissions issue. Fail loudly with a clear error instead.
  */
 export async function editCard(channelId: string, messageId: string, payload: Record<string, unknown>): Promise<void> {
+  if (!messageId) {
+    throw new Error('editCard: messageId is empty — cannot PATCH without a target message id');
+  }
   const r = await fetch(`${API_BASE}/channels/${channelId}/messages/${messageId}`, {
     method: 'PATCH',
     headers: authHeaders(),
@@ -254,6 +290,19 @@ export async function deferInteraction(interactionId: string, interactionToken: 
  */
 export async function openEditModal(interactionId: string, interactionToken: string, row: CardRow): Promise<void> {
   void interactionId;
+  // SPEC §3.10: Discord TEXT_INPUT values are capped at 4000 chars.
+  // Truncate the prefilled draft to fit; a draft over 4000 chars would
+  // otherwise make Discord reject the modal with "This interaction failed."
+  const MAX_MODAL_VALUE = 4000;
+  const prefill = row.draftReply ?? '';
+  const truncated = prefill.length > MAX_MODAL_VALUE
+    ? prefill.slice(0, MAX_MODAL_VALUE)
+    : prefill;
+  if (prefill.length > MAX_MODAL_VALUE) {
+    console.warn(
+      `[discord] openEditModal: truncating draft (${prefill.length} chars) to ${MAX_MODAL_VALUE}-char cap`,
+    );
+  }
   const r = await fetch(
     `https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`,
     {
@@ -273,8 +322,9 @@ export async function openEditModal(interactionId: string, interactionToken: str
                   style: 2, // PARAGRAPH
                   label: 'Draft reply (will be sent verbatim)',
                   custom_id: 'draft_text',
-                  value: row.draftReply ?? '',
+                  value: truncated,
                   required: true,
+                  max_length: MAX_MODAL_VALUE,
                 },
               ],
             },

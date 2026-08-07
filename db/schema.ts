@@ -1,9 +1,18 @@
-import { pgTable, uuid, text, integer, boolean, timestamp, index } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, text, integer, boolean, timestamp, jsonb, index } from 'drizzle-orm/pg-core';
 
 // email_queue — one row per inbound message (real, skipped, or error).
 // status values: pending | approved | rejected | sent | skipped | error
-// category values: recycling_request | newsletter | dmarc | spam |
-//   listing_request | partner_inquiry | support | claim | out_of_scope | other
+//   (plus 'sending' as a transient claim state for Approve idempotency —
+//   see api/discord.ts handleApprove conditional-write guard).
+// category values: recycling_help | recycling_request | newsletter | dmarc |
+//   bounce | spam | listing_request | partner_inquiry | support | claim |
+//   out_of_scope | other
+//   (recycling_help: a person asking where/how to recycle items, reply-worthy,
+//    composed from a deterministic city-page template — see SPEC §2.3.
+//    recycling_request: the Web3Forms city-page form, pre-filtered to
+//    Make.com-handled. The two are deliberately distinct.
+//    bounce: MAILER-DAEMON / multipart/report delivery-status notifications,
+//    pre-filtered to skipped + read; surfaced via a weekly digest — §3.6.)
 // (kept as text rather than pg enums for v2 extendability — see plan §6)
 export const emailQueue = pgTable('email_queue', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -11,17 +20,35 @@ export const emailQueue = pgTable('email_queue', {
   imapUid: integer('imap_uid'),
   fromAddr: text('from_addr').notNull(),
   fromName: text('from_name'),
+  // Reply-To header resolved at parse time (lib/imap.ts parseFetched).
+  // For most senders this is null and replies go to fromAddr. For
+  // automated senders that wrap real humans (Web3Forms, mailing lists,
+  // ticketing systems), this holds the actual human address and is what
+  // replies MUST use. See lib/mail/recipient.ts replyRecipient().
+  replyTo: text('reply_to'),
   subject: text('subject'),
   bodySnippet: text('body_snippet'),
   category: text('category'),
   shouldReply: boolean('should_reply').default(false),
   draftReply: text('draft_reply'),
+  // status values: pending | approved | rejected | sent | skipped | error
+  //   (plus 'sending' as a transient claim state for Approve idempotency —
+  //   see api/discord.ts handleApprove conditional-write guard).
   status: text('status').default('pending'),
   skipReason: text('skip_reason'),
   discordMessageId: text('discord_message_id'),
   inReplyTo: text('in_reply_to'),
   emailReferences: text('email_references'),
   errorDetail: text('error_detail'),
+  // recycling_help audit trail (SPEC §2.7). The model emits structured
+  // location fields; code resolves them to a real city-page URL from the
+  // site index. Persist all three (location hint, resolved URL, routing
+  // label) so a bad resolution is traceable after the fact, the §2.8
+  // deflection report is a one-line query, and the post-approve card
+  // re-edit can show the same routing line without re-resolving.
+  locationHint: jsonb('location_hint'),
+  resolvedCityUrl: text('resolved_city_url'),
+  routingLabel: text('routing_label'),
   receivedAt: timestamp('received_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
