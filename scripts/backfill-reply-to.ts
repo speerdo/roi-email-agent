@@ -61,7 +61,10 @@ async function main() {
   const client = connectImap();
   try {
     await client.connect();
-    const lock = await client.getMailboxLock(MAILBOX, { readOnly: true });
+    // acquireTimeout for consistency with lib/imap.ts: nothing nests a
+    // lock in this script, but a hang here should fail loudly rather than
+    // wait out the socket timeout.
+    const lock = await client.getMailboxLock(MAILBOX, { readOnly: true, acquireTimeout: 15_000 });
     try {
       let updated = 0;
       let noReplyTo = 0;
