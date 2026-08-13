@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { fetchSinceUid, withImap, markSeenBatch } from '../lib/imap.js';
 import { getEnv } from '../lib/env.js';
 import { getDb } from '../lib/db.js';
-import { emailQueue } from '../db/schema.js';
+import { emailQueue, type AlertStateRow } from '../db/schema.js';
 import {
   incrementalPolicy,
   loadSyncState,
@@ -15,6 +15,15 @@ import {
 } from '../lib/poll/runner.js';
 import { postCard } from '../lib/discord/rest.js';
 import { toJSON, toDiscordLine } from '../lib/logging.js';
+import {
+  fingerprintRun,
+  decideAlert,
+  humanizeDuration,
+  loadAlertState,
+  saveAlertState,
+  clearAlertState,
+  REMINDER_INTERVAL_MS,
+} from '../lib/alerts.js';
 import { getDiscordEnv } from '../types/env.js';
 
 /**
@@ -273,36 +282,145 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // one-liner to the Discord approval channel so it surfaces somewhere a
   // human actually looks, rather than sitting in Vercel logs nobody
   // watches. Best-effort — a Discord outage here must not fail the poll.
-  const driftCount = summary.filterDriftWarnings.length;
-  if (summary.errors.length > 0 || summary.skippedByAgeCutoff > 0 || driftCount > 0) {
-    try {
-      const { DISCORD_CHANNEL_ID, DISCORD_BOT_TOKEN } = getDiscordEnv();
-      const parts = [toDiscordLine(summary)];
-      if (summary.skippedByAgeCutoff > 0) {
-        parts.push(`⚠️ ${summary.skippedByAgeCutoff} msgs older than ${POLL_MAX_AGE_DAYS}d skipped`);
-      }
-      if (driftCount > 0) {
-        parts.push(`⚠️ ${driftCount} filter-drift warning(s) — check AUTOMATED_FORM_SUBJECTS`);
-      }
-      await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ content: parts.join(' ') }),
-      });
-    } catch (err) {
-      // Non-fatal: the poll itself succeeded; the alert is best-effort.
-      console.warn('[poll] error-alert Discord post failed:', (err as Error).message);
-    }
-  }
+  //
+  // Repeat-suppressed via lib/alerts.ts: cron fires every 10 minutes, so
+  // a sustained failure would otherwise post the same line six times an
+  // hour until someone muted the channel. A changed condition still posts
+  // immediately, and recovery is announced. See lib/alerts.ts.
+  await postAlert(summary, key);
 
   // Always 200 with the summary; a 500 would make Vercel's cron retry logic
   // fire and we don't want that for partial-success runs. Real catastrophic
   // failures (IMAP down) still return 200 with the error recorded; the
   // Discord alert above handles "errors > 0".
   res.status(200).json(toJSON(summary));
+}
+
+/** Human-readable form of the alert quiet window, for the reminder text. */
+const SUPPRESSION_WINDOW_LABEL = humanizeDuration(REMINDER_INTERVAL_MS);
+
+/** Send a message to the Discord approval channel. Throws on config gaps
+ *  so the caller's best-effort catch logs them. */
+async function postToDiscord(content: string): Promise<void> {
+  const { DISCORD_CHANNEL_ID, DISCORD_BOT_TOKEN } = getDiscordEnv();
+  await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ content }),
+  });
+}
+
+/**
+ * Post the run's error alert to Discord, suppressing repeats of an
+ * unchanged condition (see lib/alerts.ts).
+ *
+ * Every failure path here degrades toward posting rather than toward
+ * silence: if the alert_state table is unreachable we post unconditionally
+ * (the pre-suppression behavior), because a duplicate alert is a nuisance
+ * while a swallowed one is a missed outage. The whole thing is best-effort
+ * — the poll has already done its real work by this point.
+ */
+async function postAlert(summary: ReturnType<typeof newRunSummary>, key: string): Promise<void> {
+  const fingerprint = fingerprintRun(summary);
+
+  let prior: AlertStateRow | null = null;
+  let stateAvailable = true;
+  try {
+    prior = await loadAlertState(key);
+  } catch (err) {
+    stateAvailable = false;
+    console.warn('[poll] alert state unavailable, posting unsuppressed:', (err as Error).message);
+  }
+
+  const now = new Date();
+  const decision = stateAvailable
+    ? decideAlert({ fingerprint, prior, now })
+    // No state: post whenever there's something to report, never suppress.
+    : fingerprint === null
+      ? ({ action: 'none' } as const)
+      : ({ action: 'post', occurrences: 1 } as const);
+
+  if (decision.action === 'none') return;
+
+  if (decision.action === 'suppress') {
+    console.log(
+      `[poll] alert suppressed (unchanged condition, occurrence ${decision.occurrences}): ${fingerprint}`,
+    );
+    // Still record the tick so the reminder can cite an accurate count.
+    if (stateAvailable && fingerprint) {
+      try {
+        await saveAlertState(key, {
+          fingerprint,
+          occurrences: decision.occurrences,
+          firstSeenAt: prior?.firstSeenAt ?? now,
+          now,
+          postedNow: false,
+        });
+      } catch (err) {
+        console.warn('[poll] alert state save failed:', (err as Error).message);
+      }
+    }
+    return;
+  }
+
+  if (decision.action === 'recovered') {
+    const since = humanizeDuration(now.getTime() - decision.firstSeenAt.getTime());
+    try {
+      await postToDiscord(
+        `✅ **recovered** ${key} — poll is clean again after ${decision.occurrences} failing run(s) over ${since}.`,
+      );
+    } catch (err) {
+      console.warn('[poll] recovery Discord post failed:', (err as Error).message);
+    }
+    try {
+      await clearAlertState(key);
+    } catch (err) {
+      console.warn('[poll] alert state clear failed:', (err as Error).message);
+    }
+    return;
+  }
+
+  // 'post' (new condition) or 'remind' (unchanged, quiet window elapsed).
+  const parts = [toDiscordLine(summary)];
+  if (summary.skippedByAgeCutoff > 0) {
+    parts.push(`⚠️ ${summary.skippedByAgeCutoff} msgs older than ${POLL_MAX_AGE_DAYS}d skipped`);
+  }
+  if (summary.filterDriftWarnings.length > 0) {
+    parts.push(
+      `⚠️ ${summary.filterDriftWarnings.length} filter-drift warning(s) — check AUTOMATED_FORM_SUBJECTS`,
+    );
+  }
+  if (decision.action === 'remind') {
+    const since = humanizeDuration(now.getTime() - decision.firstSeenAt.getTime());
+    parts.push(
+      `\n_↻ still failing — ${decision.occurrences} runs over ${since}. Further identical alerts are suppressed for ${SUPPRESSION_WINDOW_LABEL}._`,
+    );
+  }
+
+  try {
+    await postToDiscord(parts.join(' '));
+  } catch (err) {
+    // Non-fatal: the poll itself succeeded; the alert is best-effort.
+    console.warn('[poll] error-alert Discord post failed:', (err as Error).message);
+    return; // Don't reset the quiet window on a post that never landed.
+  }
+
+  if (stateAvailable && fingerprint) {
+    try {
+      await saveAlertState(key, {
+        fingerprint,
+        occurrences: decision.occurrences,
+        firstSeenAt: decision.action === 'remind' ? decision.firstSeenAt : now,
+        now,
+        postedNow: true,
+      });
+    } catch (err) {
+      console.warn('[poll] alert state save failed:', (err as Error).message);
+    }
+  }
 }
 
 // Local helper kept next to its sole caller so we don't expand the runner's

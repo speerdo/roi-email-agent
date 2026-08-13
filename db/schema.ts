@@ -65,7 +65,31 @@ export const emailSyncState = pgTable('email_sync_state', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
+// alert_state — de-duplication state for the Discord error alert, one row
+// per alert key (the poller uses its mailbox key). Cron runs every 10
+// minutes in a serverless function, so "have I already reported this?"
+// cannot live in process memory; it has to be durable.
+//
+// `fingerprint` is a normalized digest of what was wrong (see
+// lib/alerts.ts fingerprintRun). While it stays the same we post once,
+// then only on the reminder interval, counting the silent ticks in
+// `occurrences`. When it changes or clears, we post again — so a NEW
+// failure is never masked by an ongoing one.
+export const alertState = pgTable('alert_state', {
+  key: text('key').primaryKey(),
+  fingerprint: text('fingerprint').notNull(),
+  /** Consecutive runs that reported this same fingerprint, including the
+   *  ones suppressed. Surfaced in the reminder so a reader can tell a
+   *  blip from a 6-hour outage. */
+  occurrences: integer('occurrences').notNull().default(1),
+  firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).defaultNow().notNull(),
+  lastPostedAt: timestamp('last_posted_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
 export type EmailQueueRow = typeof emailQueue.$inferSelect;
 export type NewEmailQueueRow = typeof emailQueue.$inferInsert;
 export type EmailSyncStateRow = typeof emailSyncState.$inferSelect;
 export type NewEmailSyncStateRow = typeof emailSyncState.$inferInsert;
+export type AlertStateRow = typeof alertState.$inferSelect;
+export type NewAlertStateRow = typeof alertState.$inferInsert;
