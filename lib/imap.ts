@@ -69,8 +69,34 @@ function baseOptions(): ImapFlowOptions {
     // in api/poll.ts gets a chance to record the error and persist
     // whatever progress was already made.
     socketTimeout: 30_000,
+    // ImapFlow's own defaults here are 90s (TCP connect) and 16s (server
+    // greeting), both far too generous for a function that normally
+    // finishes the entire poll in ~2s. mail.privateemail.com intermittently
+    // stalls the accept -> greeting handoff for ~9s and sometimes resets
+    // the socket instead of completing it (see connectWithRetry below), so
+    // we want a stalled attempt abandoned early enough to leave room for a
+    // retry inside the same run rather than nursed along to 90s.
+    connectionTimeout: 15_000,
+    greetingTimeout: 12_000,
   };
 }
+
+/** Total connect attempts (1 initial + 2 retries) before giving up. */
+const CONNECT_ATTEMPTS = 3;
+
+/** Base backoff between connect attempts; doubles each retry (0.5s, 1s). */
+const CONNECT_RETRY_BASE_MS = 500;
+
+/**
+ * Hard ceiling on a single connect attempt. ImapFlow's connect() walks
+ * several phases (TCP, TLS, greeting, CAPABILITY, LOGIN) each with its own
+ * timer, so the phase timeouts alone can compound past what a 120s
+ * maxDuration can absorb across three attempts. This bounds one attempt
+ * outright: 3 x 15s worst case still leaves the batch most of its budget.
+ */
+const CONNECT_ATTEMPT_TIMEOUT_MS = 15_000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Open an ImapFlow connection. Caller MUST guard with try/finally calling
@@ -91,13 +117,78 @@ export function connectImap(): ImapFlow {
 }
 
 /**
- * Scoped helper: opens a connection, runs the callback with the client,
- * always closes the connection in finally.
+ * Open a connection, retrying the connect handshake on a FRESH socket when
+ * it fails or stalls.
+ *
+ * Why: mail.privateemail.com (a single A record, 198.54.122.135) has a
+ * flaky frontend -> backend mailbox handoff. Measured against it on
+ * 2026-08-31, a healthy connect+login is ~900ms; in a sample of 8 probes
+ * one stalled for 9127ms. Most such stalls eventually complete, and some
+ * get reset by the server instead (`read ECONNRESET` — the production run
+ * that prompted this took 10931ms before failing that way, matching the
+ * stall almost exactly). Before this, one such reset failed the entire
+ * 10-minute cron tick and cost two Discord alerts — the error, then the
+ * "recovered" note on the next tick. The stall is per-connection and
+ * random, so a second attempt on a new socket almost always succeeds.
+ *
+ * Only the handshake is retried. The caller's callback is NEVER re-run: it
+ * performs side effects (row inserts, Discord card posts, \\Seen flagging)
+ * that are not idempotent, so retrying it could double-post.
+ */
+async function connectWithRetry(): Promise<ImapFlow> {
+  let lastErr: Error | undefined;
+
+  for (let attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt++) {
+    const client = connectImap();
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        client.connect(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`connect exceeded ${CONNECT_ATTEMPT_TIMEOUT_MS}ms`)),
+            CONNECT_ATTEMPT_TIMEOUT_MS,
+          );
+        }),
+      ]);
+      if (attempt > 1) {
+        console.warn(`[imap] connect succeeded on attempt ${attempt}/${CONNECT_ATTEMPTS}`);
+      }
+      return client;
+    } catch (err) {
+      lastErr = err as Error;
+      // Always tear the half-open socket down before trying again, or a
+      // timed-out attempt leaks a live connection that keeps counting
+      // against the server's per-account connection limit.
+      try {
+        client.close();
+      } catch {
+        /* already dead */
+      }
+      if (attempt === CONNECT_ATTEMPTS) break;
+      const delay = CONNECT_RETRY_BASE_MS * 2 ** (attempt - 1);
+      console.warn(
+        `[imap] connect attempt ${attempt}/${CONNECT_ATTEMPTS} failed (${lastErr.message}); retrying in ${delay}ms`,
+      );
+      await sleep(delay);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw new Error(
+    `imap connect failed after ${CONNECT_ATTEMPTS} attempts: ${lastErr?.message ?? 'unknown error'}`,
+  );
+}
+
+/**
+ * Scoped helper: opens a connection (retrying the handshake — see
+ * connectWithRetry), runs the callback with the client, always closes the
+ * connection in finally.
  */
 export async function withImap<T>(fn: (client: ImapFlow) => Promise<T>): Promise<T> {
-  const client = connectImap();
+  const client = await connectWithRetry();
   try {
-    await client.connect();
     return await fn(client);
   } finally {
     try {

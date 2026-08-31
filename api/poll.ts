@@ -251,6 +251,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // IMAP connection or fetch-level error. Record and continue below so we
     // still return a summary and advance the cursor to whatever was
     // genuinely persisted before the failure.
+    //
+    // Log it too. recordError only puts the text in the run summary, which
+    // reaches Discord and the HTTP response — and the Discord alert is
+    // repeat-suppressed (lib/alerts.ts), so on a sustained outage the text
+    // may be posted once and then never again. Without this line the error
+    // is absent from Vercel logs entirely: searching the whole retention
+    // window for "imap"/"ECONNRESET" after the 2026-08-31 reset returned
+    // nothing, because the ImapFlow 'error' listener in lib/imap.ts only
+    // fires for an ESTABLISHED connection, never for a rejected connect().
+    console.error(`[poll] imap stage failed: ${e.message}`);
     recordError(summary, { stage: 'imap', message: e.message });
   }
 
