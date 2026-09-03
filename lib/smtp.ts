@@ -4,6 +4,7 @@ import { getEnv } from './env.js';
 import { appendSent } from './imap.js';
 import { replyInReplyTo, replyReferences, replySubject } from './mail/headers.js';
 import {
+  DRAFT_SIGNOFF,
   TEXT_SIGNATURE,
   buildHtmlBody,
   signatureAttachment,
@@ -85,11 +86,18 @@ export async function sendReply(input: SendReplyInput): Promise<SendReplyResult>
   const references = replyReferences(input.inboundMessageId, input.inboundReferences);
 
   // Plain text: draft + branded signature block.
-  // HTML: draft (escaped, <pre> for newlines) + branded signature with
+  // HTML: draft (real <p> paragraphs) + branded signature with the
   // inline-embedded logo via cid:signature-logo. Email clients that
   // block remote images by default still render inline cid: attachments.
-  const text = `${input.text}\n${TEXT_SIGNATURE}`;
-  const html = buildHtmlBody(input.text);
+  //
+  // The house sign-off ("RecycleOldTech / Adam") is stripped before both
+  // builds: the signature block below it already carries Adam's name, so
+  // leaving the sign-off in would show it twice in a row. DRAFT_SIGNOFF
+  // is imported verbatim rather than duplicated here so a future sign-off
+  // wording change updates both prompt and stripper in one place.
+  const body = input.text.replace(new RegExp(`\\s*${DRAFT_SIGNOFF}\\s*$`), '').trimEnd();
+  const text = `${body}\n${TEXT_SIGNATURE}`;
+  const html = buildHtmlBody(body);
   const attachments = [signatureAttachment()];
 
   const info = await transport.sendMail({

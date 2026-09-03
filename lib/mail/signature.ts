@@ -17,8 +17,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// lib/mail/ -> ../../assets/images/default-og.png
-const LOGO_PATH = resolve(__dirname, '../../assets/images/default-og.png');
+// lib/mail/ -> ../../assets/images/signature-logo.png
+const LOGO_PATH = resolve(__dirname, '../../assets/images/signature-logo.png');
 
 export interface SignatureAttachment {
   filename: string;
@@ -37,6 +37,40 @@ function logoBuffer(): Buffer {
 }
 
 /**
+ * The "RecycleOldTech / Adam" sign-off Gemini and the recycling templates
+ * append to every draft. Once the branded signature block is appended at
+ * SMTP time, the sign-off is redundant (Adam Speer appears in the real
+ * signature below it), so it is stripped before sending — see
+ * stripDraftSignoff().
+ */
+export const DRAFT_SIGNOFF = 'RecycleOldTech / Adam';
+
+/**
+ * Remove the house sign-off ("RecycleOldTech / Adam") from the end of a
+ * draft. The branded signature block appended at SMTP time already
+ * includes Adam's name, so keeping the sign-off would render it twice in
+ * a row:
+ *
+ *   We appreciate you thinking of us.
+ *   RecycleOldTech / Adam        <- duplicated, looks broken
+ *   --
+ *   Adam Speer
+ *   RecycleOldTech
+ *   https://recycleoldtech.com
+ *
+ * Tolerates trailing whitespace/newlines and optional surrounding blank
+ * lines. Nothing else in the body is touched — the sign-off is only ever
+ * the last non-empty line, and the pattern is exact so a mid-body "made
+ * by RecycleOldTech / Adam & sons" would never match.
+ */
+export function stripDraftSignoff(draft: string): string {
+  return draft
+    .replace(/[ \t]+$/gm, '')
+    .replace(new RegExp(`(?:\\n*${DRAFT_SIGNOFF}[ \\t]*\\n*)+$`), '')
+    .trimEnd();
+}
+
+/**
  * Plain-text signature block. Appended after the draft body with a
  * blank separator line. Kept short and ASCII-only so it reads cleanly
  * in plain-text clients and in the Discord card preview (which shows
@@ -51,39 +85,65 @@ export const TEXT_SIGNATURE = [
 ].join('\n');
 
 /**
- * HTML signature block. The {BODY} placeholder is replaced with the
- * HTML-escaped draft body (wrapped in <pre> to preserve Gemini's
- * newlines) by buildSignatureHtml() below.
+ * Convert a plain-text draft into a paragraph-based HTML block. Drafts
+ * arrive with \n\n paragraph breaks (from Gemini and the recyclingHelp
+ * templates) and occasional single \n soft breaks.
  *
- * Inline CSS keeps it self-contained — many email clients strip
- * <style> blocks. The logo sits to the left of the text in a
- * two-column table (the most reliable layout construct in email HTML).
+ * We deliberately do NOT wrap the draft in a single <pre> relying on
+ * `white-space:pre-wrap`: the sanitizers in some webmail clients
+ * (notably Open-Xchange builds such as PrivateEmail) strip that
+ * property, and the client then renders every line run together into
+ * one wall of text. Real paragraph tags survive sanitization everywhere.
+ */
+const FONT_STYLE = 'font-family:Arial, Helvetica, sans-serif; font-size:14px; line-height:1.5; color:#111827;';
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Turn draft text into sanitized HTML paragraphs: split on \n\n (or more
+ * newlines) into paragraphs; within a paragraph, single \n soft breaks
+ * become <br>. Each paragraph is HTML-escaped so model output can't
+ * inject markup, and wrapped in a <p> with the house font styling.
+ */
+export function draftToHtml(draftText: string): string {
+  const paragraphs = draftText
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0)
+    .map((p) => `<p style="margin:0 0 14px 0;">${escapeHtml(p).replace(/\n/g, '<br />')}</p>`);
+  return paragraphs.join('\n');
+}
+
+/**
+ * HTML signature block. Inline CSS keeps it self-contained — many email
+ * clients strip <style> blocks.
  */
 function signatureHtml(): string {
   return `
-<div style="margin-top:24px; border-top:1px solid #e5e7eb; padding-top:16px; font-family:Arial, Helvetica, sans-serif; font-size:14px; line-height:1.5; color:#111827;">
+<div style="margin-top:24px; border-top:1px solid #e5e7eb; padding-top:16px; ${FONT_STYLE}">
   <div style="font-weight:bold; font-size:15px;">Adam Speer</div>
   <div style="color:#4b5563;">RecycleOldTech</div>
   <div style="margin-top:4px;">
     <a href="https://recycleoldtech.com" style="color:#4f46e5; text-decoration:none;">www.recycleoldtech.com</a>
   </div>
-  <img src="cid:signature-logo" width="300" height="158" alt="RecycleOldTech" style="display:block; margin-top:12px; max-width:100%; height:auto; border-radius:8px;" />
+  <img src="cid:signature-logo" width="300" height="37" alt="RecycleOldTech.com" style="display:block; margin-top:12px; max-width:300px; height:auto; border:0;" />
 </div>`;
 }
 
 /**
- * Build the full HTML body for an outbound reply: the draft text in a
- * <pre> block (preserves newlines without forcing a monospace font on
- * the whole message) followed by the branded signature. Draft text is
- * HTML-escaped so model output can't inject markup.
+ * Build the full HTML body for an outbound reply: the draft converted to
+ * real <p> paragraphs (survives client sanitization, unlike <pre> +
+ * white-space:pre-wrap which some webmail clients strip, collapsing the
+ * message into one line) followed by the branded signature.
  */
 export function buildHtmlBody(draftText: string): string {
-  const escaped = draftText
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-  return `<div style="font-family:Arial, Helvetica, sans-serif; font-size:14px; line-height:1.5; color:#111827;">
-<pre style="font-family:Arial, Helvetica, sans-serif; white-space:pre-wrap; margin:0;">${escaped}</pre>${signatureHtml()}
+  return `<div style="${FONT_STYLE}">
+${draftToHtml(draftText)}${signatureHtml()}
 </div>`;
 }
 

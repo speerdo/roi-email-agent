@@ -8,10 +8,10 @@
 // URL for this flow. See docs/SPEC_TRIAGE_FIXES.md §2.5-2.6.
 //
 // House style from lib/gemini/prompt.ts applies: no em dashes, sign off
-// "RecycleOldTech / Adam" — same as the model's own drafts, so an approved
-// recycling_help reply reads identically to every other reply. lib/smtp.ts
-// additionally appends the branded signature block
-// (lib/mail/signature.ts TEXT_SIGNATURE) to every outbound message.
+// "RecycleOldTech / Adam" — same as the model's own drafts. lib/smtp.ts
+// strips that sign-off on send (the branded signature block from
+// lib/mail/signature.ts replaces it), but drafts and Discord cards show
+// the draft verbatim, so the sign-off stays part of the template here.
 
 import type { ResolvedCityPage } from '../../site/resolveCityPage.js';
 import { canonicalStateName } from '../../site/cityIndex.js';

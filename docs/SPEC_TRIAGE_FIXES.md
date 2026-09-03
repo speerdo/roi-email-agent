@@ -365,8 +365,12 @@ Notes:
 
 Deterministic, composed in `lib/mail/templates/recyclingHelp.ts`, not by
 Gemini. House style from `lib/gemini/prompt.ts` applies: no em dashes, sign off
-`RecycleOldTech / Adam` (the SMTP signature block in `lib/mail/signature.ts` is
-appended on top automatically).
+`RecycleOldTech / Adam`. That sign-off stays in the draft (it is what Adam
+reviews on the Discord card); at SMTP time `lib/smtp.ts` strips it and appends
+the branded signature block from `lib/mail/signature.ts`, which already carries
+Adam's name. The HTML part is built as real `<p>` paragraphs — the earlier
+`<pre>` + `white-space:pre-wrap` wrapper was stripped by Open-Xchange webmail
+(PrivateEmail), collapsing the whole reply into one line.
 
 **Template A — city page resolved.** Both options, form first:
 
