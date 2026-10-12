@@ -183,8 +183,12 @@ already treats `should_reply=true, draft_reply=""` as a card with an empty body.
 
 Pre-filters run in code **before** any Gemini call, in this order (first match
 wins). They are configured per brand. The critical difference from ROI: DD's
-**contact-form mail must reach Gemini**, so nothing may filter on
-`notify@web3forms.com` alone.
+**contact-form mail must reach Gemini**, so nothing may filter on the
+Web3Forms sender (`notify@web3forms.com`) alone. Note that Web3Forms
+plus-addresses the sender per form key, so DD mail arrives as
+`notify+kjvf7p@web3forms.com`. Any sender check that does exist must match the
+`@web3forms.com` **domain**, never the exact `notify@` local part, or it will
+miss (or, worse, wrongly match) a form. Prefer matching the subject.
 
 ### 3.1 Newsletter signups — skip, store, notify (do not filter on sender alone)
 
@@ -224,14 +228,19 @@ The contact form (`contact.astro`) posts through Web3Forms with
 `Partnership Opportunity`, or `Other`. These are the mail we reply to.
 
 - DD must **not** carry ROI's `AUTOMATED_FORM_SUBJECTS=Recycling request from`
-  filter. If it did (with the shared `notify@web3forms.com` sender), it would
-  silently skip DD mail whose subject happened to start with that prefix, which
-  cannot happen today but is a pointless landmine.
+  filter. If it did (with a Web3Forms sender), it would silently skip DD mail
+  whose subject happened to start with that prefix, which cannot happen today
+  but is a pointless landmine.
 - In the multi-brand profile, DD's prefilter list is just
   `[newsletter, dmarc, bounce]`. No form pre-filter.
-- Replies must go to **Reply-To** (the submitter), never to
-  `notify@web3forms.com`. `lib/mail/recipient.ts` already resolves this; DD
-  inherits it unchanged.
+- Replies must go to **Reply-To** (the submitter), never to the Web3Forms
+  sender. `lib/mail/recipient.ts` already resolves this; DD inherits it
+  unchanged.
+- **Sender matching, if ever needed:** match the `@web3forms.com` domain (or,
+  better, the subject), because the local part is plus-addressed per form key
+  (`notify+kjvf7p@web3forms.com` for DD's contact form; ROI's forms use the
+  plain `notify@web3forms.com`). An exact `From: notify@web3forms.com` check
+  would miss DD mail entirely.
 
 ### 3.3 DMARC and bounce — same as ROI
 
@@ -255,17 +264,22 @@ The contact form (`contact.astro`) posts through Web3Forms with
 
 ## 4. Synthetic fixtures (Web3Forms format)
 
-These mirror the shape of real Web3Forms notifications. The authoritative real
-example is quoted in `docs/SPEC_TRIAGE_FIXES.md` §2.1 (`name : Kevin` /
-`email : …` / `message : …`, `From: "Notifications" <notify@web3forms.com>`,
-`Reply-To: <submitter>`). One fixture per contact-form topic, so all six form
-subjects are covered. `sender_name` is extracted from the body `name :` line,
-not from the From header.
+These mirror the shape of real Web3Forms notifications. The body shape is
+**confirmed against a real DD submission** (Sean Hawthorne, `Venue Submission`,
+2026-10-11): the `name :` / `email :` / `message :` lines match the fixtures
+below exactly. One fixture per contact-form topic, so all six form subjects are
+covered. `sender_name` is extracted from the body `name :` line, not from the
+From header.
+
+One sender detail differs from the ROI example in
+`docs/SPEC_TRIAGE_FIXES.md` §2.1: Web3Forms plus-addresses the sender per form
+key, so DD mail arrives as **`notify+kjvf7p@web3forms.com`**, not the plain
+`notify@web3forms.com`. See section 3 for why that matters to any sender check.
 
 Test shape (as a plain-text fixture):
 
 ```
-From: "Notifications" <notify@web3forms.com>
+From: "Notifications" <notify+kjvf7p@web3forms.com>
 Reply-To: <submitter address>
 To: hello@downtowndry.bar
 Subject: <contact-form topic>
@@ -278,7 +292,7 @@ message : <message body>
 ### F1 — Venue submission
 
 ```
-From: "Notifications" <notify@web3forms.com>
+From: "Notifications" <notify+kjvf7p@web3forms.com>
 Reply-To: jane.guest@example.com
 To: hello@downtowndry.bar
 Subject: Venue Submission
@@ -298,7 +312,7 @@ alcohol free, a six-deep zero-proof list, open late. You should list it.
 ### F2 — Listing update
 
 ```
-From: "Notifications" <notify@web3forms.com>
+From: "Notifications" <notify+kjvf7p@web3forms.com>
 Reply-To: marcus@kavaloungepdx.example
 To: hello@downtowndry.bar
 Subject: Listing Update
@@ -317,7 +331,7 @@ open until 2am now. The address on your page is old.
 ### F3 — Website feedback
 
 ```
-From: "Notifications" <notify@web3forms.com>
+From: "Notifications" <notify+kjvf7p@web3forms.com>
 Reply-To: sam.reed@example.net
 To: hello@downtowndry.bar
 Subject: Website Feedback
@@ -336,7 +350,7 @@ back. On Android, Chrome.
 ### F4 — Press inquiry
 
 ```
-From: "Notifications" <notify@web3forms.com>
+From: "Notifications" <notify+kjvf7p@web3forms.com>
 Reply-To: reporter@dailybrew.example
 To: hello@downtowndry.bar
 Subject: Press Inquiry
@@ -356,7 +370,7 @@ share how many venues and cities you cover now?
 ### F5 — Partnership opportunity
 
 ```
-From: "Notifications" <notify@web3forms.com>
+From: "Notifications" <notify+kjvf7p@web3forms.com>
 Reply-To: hello@betterrhodes.example
 To: hello@downtowndry.bar
 Subject: Partnership Opportunity
@@ -378,7 +392,7 @@ The contact form's `Other` topic. This is where a venue asking about promotion
 lands, since there is no dedicated "enhanced listing" topic yet.
 
 ```
-From: "Notifications" <notify@web3forms.com>
+From: "Notifications" <notify+kjvf7p@web3forms.com>
 Reply-To: owner@thequietroom.example
 To: hello@downtowndry.bar
 Subject: Other
@@ -400,7 +414,7 @@ involve and what does it cost?
 
 | id | From / Subject / body cue | expected category | should_reply |
 | --- | --- | --- | --- |
-| N1 | `notify@web3forms.com`, `New Newsletter Subscriber - Blog Page`, body `email : reader@example.com` | *(removed by pre-filter)* `newsletter_signup` | n/a (no LLM) |
+| N1 | `notify+kjvf7p@web3forms.com`, `New Newsletter Subscriber - Blog Page`, body `email : reader@example.com` | *(removed by pre-filter)* `newsletter_signup` | n/a (no LLM) |
 | N2 | `seo@rankup.example`, subject `Boost your traffic with guest posts`, generic SEO pitch | `spam` | `false` |
 | N3 | `someone@example.com`, subject `Can you tell me if kava is safe with my medication?` | `out_of_scope` | `true` (short decline; not medical advice) |
 | N4 | `notify@web3forms.com`, subject `Recycling request from Austin, TX` sent to a DD mailbox | `other` (falls through, irrelevant to DD) | `false` |
@@ -435,12 +449,15 @@ HTML: `Adam`, then a link to `https://downtowndry.bar`, then the inline
 
 ## 6. Handoff / open items
 
-- The exact Web3Forms body format is taken from the real ROI contact-form
-  example in `SPEC_TRIAGE_FIXES.md` §2.1. Before go-live, confirm one live DD
-  contact submission lands in `hello@downtowndry.bar` (adam switches the
-  Web3Forms notification address; plan Decisions) and matches this shape. If
-  Web3Forms formats fields differently (for example as `Name:` with a capital),
-  update the fixtures here.
+- **Web3Forms body shape: confirmed.** Checked against a real DD submission
+  (Sean Hawthorne, `Venue Submission`, 2026-10-11); the `name :` / `email :` /
+  `message :` body matches the fixtures here. Sender is plus-addressed
+  (`notify+kjvf7p@web3forms.com`); any sender check must match the
+  `@web3forms.com` domain, not the exact local part (section 3).
+- Remaining go-live check (infrastructure, not format): confirm DD form
+  notifications are delivered to `hello@downtowndry.bar`. adam switches the
+  Web3Forms notification address (plan Decisions); until then DD form mail
+  never reaches the bot.
 - Enhanced-listings copy stays at "Adam will follow up" until the product
   exists.
 - Task 3 wires the profile into code: `brand` column, `/api/poll?brand=downtowndry`,
