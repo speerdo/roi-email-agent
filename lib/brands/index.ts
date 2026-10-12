@@ -6,11 +6,13 @@
 
 import type { BrandProfile } from './types.js';
 import { ROI_BRAND } from './roi.js';
+import { DOWNTOWNDRY_BRAND } from './downtowndry.js';
 
 export type { BrandProfile, BrandPrefilterConfig, BrandSignatureConfig } from './types.js';
 
 const REGISTRY: Readonly<Record<string, BrandProfile>> = {
   [ROI_BRAND.id]: ROI_BRAND,
+  [DOWNTOWNDRY_BRAND.id]: DOWNTOWNDRY_BRAND,
 };
 
 /** Every registered brand profile. */
