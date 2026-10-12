@@ -3,7 +3,13 @@
   "cleanUrls": true,
   "crons": [
     { "path": "/api/poll", "schedule": "*/10 * * * *" },
-    { "path": "/api/poll?brand=downtowndry", "schedule": "5-59/10 * * * *" }
+    { "path": "/api/poll/downtowndry", "schedule": "5-59/10 * * * *" }
+  ],
+  "rewrites": [
+    {
+      "source": "/api/poll/:brand",
+      "destination": "/api/poll?brand=:brand"
+    }
   ],
   "functions": {
     "api/*.ts": { "maxDuration": 120 }

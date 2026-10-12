@@ -101,6 +101,19 @@ export function codeBlock(text: string, maxLen: number, emptyPlaceholder: string
  * original email snippet sits alongside it in a field so the reviewer can
  * judge alignment without leaving Discord.
  */
+// ---- Card title -----------------------------------------------------------
+
+/**
+ * Build an embed title, applying the brand prefix ("[ROI]"/"[DD]") and the
+ * shared truncation cap. Used by BOTH card builders and the inline failure
+ * cards in api/discord.ts so a failure card keeps the same brand prefix as
+ * the card it edits.
+ */
+export function cardTitle(subject: string | null | undefined, prefix = ''): string {
+  const base = subject ?? '(no subject)';
+  return truncatePlain(prefix ? `${prefix} ${base}` : base, MAX_EMBED_TITLE);
+}
+
 export function buildCardPayload(row: CardRow, cardPrefix = ''): Record<string, unknown> {
   // Show the address an approved reply will actually go to. When Reply-To
   // differs from From (e.g. Web3Forms), this renders as
@@ -128,10 +141,7 @@ export function buildCardPayload(row: CardRow, cardPrefix = ''): Record<string, 
   fields.push({ name: 'Original email', value: snippetBlock, inline: false });
 
   const embed = {
-    title: truncatePlain(
-      cardPrefix ? `${cardPrefix} ${row.subject ?? '(no subject)'}` : row.subject ?? '(no subject)',
-      MAX_EMBED_TITLE,
-    ),
+    title: cardTitle(row.subject, cardPrefix),
     description: draftBlock,
     fields,
     color: 0x4f46e5, // indigo, just so cards are visually distinct from chat
@@ -198,10 +208,7 @@ export function buildResolvedCardPayload(row: CardRow, outcome: 'sent' | 'sent_e
   fields.push({ name: 'Original email', value: snippetBlock, inline: false });
 
   const embed = {
-    title: truncatePlain(
-      cardPrefix ? `${cardPrefix} ${row.subject ?? '(no subject)'}` : row.subject ?? '(no subject)',
-      MAX_EMBED_TITLE,
-    ),
+    title: cardTitle(row.subject, cardPrefix),
     description: `${outcomeText}\n\n${draftBlock}`,
     fields,
     color: outcome === 'send_failed' ? 0xb91c1c : 0x16a34a,

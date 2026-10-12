@@ -66,8 +66,10 @@ export const emailQueue = pgTable('email_queue', {
 // email_sync_state — incremental poller cursor. One row per sync key.
 // Key format: `<brand>:INBOX` (e.g. "roi:INBOX") since Task 3 — each brand
 // polls its own mailbox and MUST NOT reuse another brand's lastUid.
-// Migration 0005 renames the single pre-existing ROI row
-// (previously keyed `hello@recycleoldtech.com/INBOX`) to `roi:INBOX`.
+// Migration 0005 COPIES the pre-existing ROI row
+// (previously keyed `hello@recycleoldtech.com/INBOX`) to `roi:INBOX` —
+// a copy, not a rename, so code live during the migration/deploy gap keeps
+// finding its key. The old row is deleted manually after cutover.
 // Backlog modes do NOT touch this.
 export const emailSyncState = pgTable('email_sync_state', {
   mailbox: text('mailbox').primaryKey(),

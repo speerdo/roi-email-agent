@@ -555,30 +555,32 @@ async function captureNewsletterSubscriber(
   }
 
   try {
-    const existing = await db()
-      .select({ id: newsletterSubscribers.id })
-      .from(newsletterSubscribers)
-      .where(
-        and(
-          eq(newsletterSubscribers.brand, brand.id),
-          eq(newsletterSubscribers.email, signup.email),
-        ),
-      )
-      .limit(1);
+    // Race-safe upsert: insert first with ON CONFLICT DO NOTHING. Two
+    // overlapping ticks can't both win the unique (brand, email) index —
+    // exactly one insert returns a row. An empty returning() means a
+    // repeat signup: refresh last_seen_at, do NOT re-announce.
+    const inserted = await db()
+      .insert(newsletterSubscribers)
+      .values({
+        brand: brand.id,
+        email: signup.email,
+        sourcePage: signup.sourcePage,
+      })
+      .onConflictDoNothing()
+      .returning({ id: newsletterSubscribers.id });
 
-    if (existing.length > 0 && existing[0]) {
+    if (inserted.length === 0) {
       await db()
         .update(newsletterSubscribers)
         .set({ lastSeenAt: new Date(), sourcePage: signup.sourcePage })
-        .where(eq(newsletterSubscribers.id, existing[0].id));
+        .where(
+          and(
+            eq(newsletterSubscribers.brand, brand.id),
+            eq(newsletterSubscribers.email, signup.email),
+          ),
+        );
       return; // Repeat signup: refresh, do not re-announce.
     }
-
-    await db().insert(newsletterSubscribers).values({
-      brand: brand.id,
-      email: signup.email,
-      sourcePage: signup.sourcePage,
-    });
   } catch (err) {
     const e = err as Error;
     console.error(`[poll] newsletter upsert failed (uid=${msg.uid}):`, e.message);

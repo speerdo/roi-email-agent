@@ -119,8 +119,10 @@ confirm the PING returns PONG.
 Once deployed to production:
 
 - **Cron:** registered in `vercel.json` — `/api/poll` (ROI) at
-  `*/10 * * * *` and `/api/poll?brand=downtowndry` at `5-59/10 * * * *`
-  (offset so the two brands never tick at the same minute-second).
+  `*/10 * * * *` and `/api/poll/downtowndry` at `5-59/10 * * * *`
+  (offset so the two brands never tick at the same minute-second; the
+  path-segment rewrite maps it to `/api/poll?brand=downtowndry` — cron
+  paths stay plain, `?brand=` remains supported in the handler).
   Confirmed in the Vercel dashboard → Cron Jobs tab (Vercel Pro required
   for sub-hourly).
 - **Discord Interactions Endpoint URL:** in the Discord Developer Portal →
@@ -148,9 +150,11 @@ Once deployed to production:
 
 `vercel.json` defines two crons: `*/10 * * * *` hitting `/api/poll` (the
 ROI brand, the default when `?brand=` is absent) and `5-59/10 * * * *`
-hitting `/api/poll?brand=downtowndry`. The endpoint authorizes via the
-`Authorization: Bearer $CRON_SECRET` header (header-only; the secret is
-never accepted via query string).
+hitting `/api/poll/downtowndry` (rewritten to
+`/api/poll?brand=downtowndry`; cron paths are plain path segments, while
+the handler keeps direct `?brand=` support). The endpoint authorizes via
+the `Authorization: Bearer $CRON_SECRET` header (header-only; the secret
+is never accepted via query string).
 
 ### Multi-brand (Task 3)
 

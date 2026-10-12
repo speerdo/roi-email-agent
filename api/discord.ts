@@ -26,6 +26,7 @@ import {
   editCard,
   deferInteraction,
   buildResolvedCardPayload,
+  cardTitle,
   type CardRow,
 } from '../lib/discord/rest.js';
 import { getBrand, type BrandProfile } from '../lib/brands/index.js';
@@ -311,7 +312,7 @@ async function doApproveWork(queueId: string, i: AnyInteraction): Promise<void> 
         .where(eq(emailQueue.id, queueId));
       await editCard(channelId, i.message?.id ?? '', {
         embeds: [{
-          title: row.subject ?? '(no subject)',
+          title: cardTitle(row.subject, brand.cardPrefix),
           description: `⚠️ Not sent: ${reason}`,
           color: 0xb91c1c,
         }],
@@ -370,7 +371,7 @@ async function doApproveWork(queueId: string, i: AnyInteraction): Promise<void> 
     try {
       await editCard(channelId, i.message?.id ?? '', {
         embeds: [{
-          title: row.subject ?? '(no subject)',
+          title: cardTitle(row.subject, brand.cardPrefix),
           description: '⚠️ Send failed — see logs. Buttons remain so you can retry.',
           color: 0xb91c1c,
         }],
@@ -593,7 +594,7 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
         .where(eq(emailQueue.id, queueId));
       await editCard(channelId, i.message?.id ?? '', {
         embeds: [{
-          title: row.subject ?? '(no subject)',
+          title: cardTitle(row.subject, brand.cardPrefix),
           description: `⚠️ Not sent: ${reason}`,
           color: 0xb91c1c,
         }],
@@ -646,7 +647,7 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
       .where(eq(emailQueue.id, queueId));
     await editCard(channelId, i.message?.id ?? '', {
       embeds: [{
-        title: row.subject ?? '(no subject)',
+        title: cardTitle(row.subject, brand.cardPrefix),
         description: '⚠️ Send failed (edited) — see logs.',
         color: 0xb91c1c,
       }],
