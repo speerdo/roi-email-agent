@@ -27,6 +27,11 @@ export interface BrandSignatureConfig {
   siteUrl: string;
   /** Logo path, relative to the project root. */
   logoPath: string;
+  /** Display width of the logo in the signature, in px. */
+  logoWidth: number;
+  /** Display height of the logo in the signature, in px (the intrinsic
+   *  ratio must match, so clients that ignore CSS don't squash it). */
+  logoHeight: number;
   /** Content-ID used by the inline <img src="cid:...">. */
   logoCid: string;
   /** Attachment filename for the embedded logo. */

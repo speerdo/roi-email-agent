@@ -121,7 +121,7 @@ export function stripDraftSignoff(
  * clients and in the Discord card preview (which shows the text part).
  */
 export function textSignature(brand: BrandProfile = DEFAULT_BRAND): string {
-  return ['', '--', brand.signature.name, brand.signature.siteUrl].join('\n');
+  return ['', '--', brand.signature.name, brand.signature.siteLabel].join('\n');
 }
 
 /**
@@ -171,7 +171,7 @@ function signatureHtml(brand: BrandProfile): string {
   <div style="margin-top:4px;">
     <a href="${escapeHtml(brand.signature.siteUrl)}" style="color:#4f46e5; text-decoration:none;">${escapeHtml(brand.signature.siteLabel)}</a>
   </div>
-  <img src="cid:${escapeHtml(brand.signature.logoCid)}" width="300" height="37" alt="${escapeHtml(brand.signature.siteLabel)}" style="display:block; margin-top:12px; max-width:300px; height:auto; border:0;" />
+  <img src="cid:${escapeHtml(brand.signature.logoCid)}" width="${brand.signature.logoWidth}" height="${brand.signature.logoHeight}" alt="${escapeHtml(brand.signature.siteLabel)}" style="display:block; margin-top:12px; max-width:${brand.signature.logoWidth}px; height:auto; border:0;" />
 </div>`;
 }
 

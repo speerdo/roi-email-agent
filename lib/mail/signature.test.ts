@@ -131,7 +131,7 @@ describe('buildHtmlBody', () => {
 });
 
 describe('textSignature', () => {
-  it('uses the RFC 3676 delimiter and carries name + site', () => {
-    expect(textSignature()).toBe('\n--\nAdam\nhttps://recycleoldtech.com');
+  it('uses the RFC 3676 delimiter and carries name + bare domain', () => {
+    expect(textSignature()).toBe('\n--\nAdam\nrecycleoldtech.com');
   });
 });

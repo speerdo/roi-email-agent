@@ -20,7 +20,7 @@
 //     from a deterministic template using the extracted location fields and
 //     a real city-page URL looked up from the site's own index. The model
 //     MUST NEVER emit a recycleoldtech.com URL for this category (a
-//     hallucinated /states/pennsylvania/greencastle 404s and the
+//     hallucinated /states/pennsylvania/greencastle-township 404s and the
 //     lead is dead). See docs/SPEC_TRIAGE_FIXES.md §2.5.
 
 import { DEFAULT_BRAND } from '../brands/index.js';

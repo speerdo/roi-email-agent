@@ -3,7 +3,7 @@ import type { Transporter } from 'nodemailer';
 import { getEnv } from './env.js';
 import { appendSent } from './imap.js';
 import { replyInReplyTo, replyReferences, replySubject } from './mail/headers.js';
-import { getBrand } from './brands/index.js';
+import { DEFAULT_BRAND } from './brands/index.js';
 import {
   buildHtmlBody,
   signatureAttachment,
@@ -76,7 +76,7 @@ export async function sendReply(input: SendReplyInput): Promise<SendReplyResult>
   const env = getEnv();
   const transport = getTransport();
 
-  const brand = getBrand('roi');
+  const brand = DEFAULT_BRAND;
   const from = `"${brand.fromName}" <${env.EMAIL_USER}>`;
 
   // Derive threading headers from the inbound row. These MUST come from
