@@ -36,6 +36,13 @@
       "when": 1786631230263,
       "tag": "0004_boring_human_fly",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1791817772809,
+      "tag": "0005_multi_brand",
+      "breakpoints": true
     }
   ]
 }

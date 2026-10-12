@@ -105,19 +105,14 @@ describe('DowntownDry sign-off stripping', () => {
 // ---------------------------------------------------------------------------
 // Web3Forms fixtures (docs/brands/DOWNTOWNDRY_PROFILE.md section 4).
 //
-// The DD newsletter pre-filter rule is "subject contains 'New Newsletter
-// Subscriber'". It is deliberately SUBJECT-only: the contact form and the
-// newsletter forms are both sent by Web3Forms, so matching the sender would
-// swallow every reply-worthy message. Task 3 lifts this rule into the
-// per-brand prefilter config; here it is a pure helper so the fixtures can be
-// asserted without touching lib/mail/prefilter.ts.
+// The DD newsletter pre-filter rule ("subject contains 'New Newsletter
+// Subscriber'") now lives in the REAL per-brand prefilter config
+// (DOWNTOWNDRY_BRAND.prefilter.newsletterSubjects), applied through the
+// production matcher matchNewsletter(). The fixtures below are asserted
+// against it directly — no local rule helper.
 // ---------------------------------------------------------------------------
 
-const NEWSLETTER_SUBJECT_PREFIX = 'new newsletter subscriber';
-
-function matchesDdNewsletter(subject: string): boolean {
-  return subject.toLowerCase().includes(NEWSLETTER_SUBJECT_PREFIX);
-}
+import { matchNewsletter, matchRecyclingRequest } from '../mail/prefilter.js';
 
 interface Fixture {
   id: string;
@@ -148,8 +143,21 @@ const FIXTURES: Fixture[] = [
 ];
 
 describe('DowntownDry fixtures vs the newsletter pre-filter', () => {
-  it.each(FIXTURES)('$id ($subject) newsletter=$newsletter', ({ subject, newsletter }) => {
-    expect(matchesDdNewsletter(subject)).toBe(newsletter);
+  it.each(FIXTURES)('$id ($subject) newsletter=$newsletter', ({ from, subject, newsletter }) => {
+    // The production matcher against DD's REAL prefilter config.
+    expect(matchNewsletter(subject, from, DD)).toBe(newsletter);
+  });
+
+  it('the newsletter rule is subject-only in the DD profile', () => {
+    expect(DD.prefilter.newsletterFrom).toBe('');
+    expect([...DD.prefilter.newsletterSubjects]).toContain('New Newsletter Subscriber');
+  });
+
+  it('DD carries NO automated-form (recycling) pre-filter', () => {
+    expect(DD.prefilter.automatedFormSubjects).toHaveLength(0);
+    expect(DD.prefilter.automatedFormFrom).toBe('');
+    // Even ROI's own form mail must NOT be filtered in a DD mailbox...
+    expect(matchRecyclingRequest('Recycling request from Austin, TX', ROI_FORM_SENDER, DD)).toBe(false);
   });
 
   it('every contact-form fixture falls through to Gemini (no form pre-filter)', () => {
@@ -165,7 +173,7 @@ describe('DowntownDry fixtures vs the newsletter pre-filter', () => {
     // even though the newsletter signups come from the same sender.
     for (const f of FIXTURES.filter((x) => x.id.startsWith('F'))) {
       expect(f.from).toContain('web3forms.com');
-      expect(matchesDdNewsletter(f.subject)).toBe(false);
+      expect(matchNewsletter(f.subject, f.from, DD)).toBe(false);
     }
   });
 });

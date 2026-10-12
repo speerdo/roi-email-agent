@@ -3,7 +3,8 @@ import type { Transporter } from 'nodemailer';
 import { getEnv } from './env.js';
 import { appendSent } from './imap.js';
 import { replyInReplyTo, replyReferences, replySubject } from './mail/headers.js';
-import { DEFAULT_BRAND } from './brands/index.js';
+import type { BrandProfile } from './brands/index.js';
+import { requireBrandEnv } from './brands/env.js';
 import {
   buildHtmlBody,
   signatureAttachment,
@@ -30,6 +31,12 @@ export interface SendReplyInput {
    *  row.emailReferences). The outbound reply's References = this chain
    *  + inboundMessageId, per RFC 5322 §3.6.4. */
   inboundReferences?: string;
+  /** The brand that owns the row being replied to. Drives the SMTP
+   *  credentials (per-brand mailbox), the From display name and the
+   *  branded signature. Required — there is no default, so a caller that
+   *  forgets to load row.brand fails loudly instead of sending as the
+   *  wrong brand. */
+  brand: BrandProfile;
 }
 
 export interface SendReplyResult {
@@ -43,22 +50,24 @@ export interface SendReplyResult {
  * Created fresh on every call (no shared pool) — serverless-friendly, since
  * a pooled connection cached at module scope can go stale across cold starts.
  */
-function getTransport(): Transporter {
+function getTransport(brand: BrandProfile): Transporter {
   const env = getEnv();
+  const brandEnv = requireBrandEnv(brand);
   return nodemailer.createTransport({
     host: env.EMAIL_SMTP_HOST,
     port: env.EMAIL_SMTP_PORT,
     secure: true, // port 465 is implicit TLS
-    auth: { user: env.EMAIL_USER, pass: env.EMAIL_PASS },
+    auth: { user: brandEnv.emailUser, pass: brandEnv.emailPass },
   });
 }
 
 // ---- Public API -----------------------------------------------------------
 
 /**
- * Send a reply via PrivateEmail SMTP, threaded to the inbound message via
- * In-Reply-To + References headers. Per plan §11, the display name is
- * the brand's fromName and the from address is EMAIL_USER.
+ * Send a reply via the brand's SMTP mailbox, threaded to the inbound
+ * message via In-Reply-To + References headers. The display name is the
+ * brand's fromName and the from address is that brand's mailbox user.
+ * Host/port, threading and signature handling are shared.
  *
  * Threading headers (SPEC §3.3): the reply's In-Reply-To is the INBOUND
  * message's Message-ID (NOT the inbound's In-Reply-To, which points at
@@ -73,11 +82,11 @@ function getTransport(): Transporter {
  * already sent, so we return `appendedToSent: false` and continue.
  */
 export async function sendReply(input: SendReplyInput): Promise<SendReplyResult> {
-  const env = getEnv();
-  const transport = getTransport();
+  const brand = input.brand;
+  const brandEnv = requireBrandEnv(brand);
+  const transport = getTransport(brand);
 
-  const brand = DEFAULT_BRAND;
-  const from = `"${brand.fromName}" <${env.EMAIL_USER}>`;
+  const from = `"${brand.fromName}" <${brandEnv.emailUser}>`;
 
   // Derive threading headers from the inbound row. These MUST come from
   // row.messageId (the inbound's own ID) and row.emailReferences (the

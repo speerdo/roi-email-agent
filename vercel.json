@@ -2,7 +2,8 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": true,
   "crons": [
-    { "path": "/api/poll", "schedule": "*/10 * * * *" }
+    { "path": "/api/poll", "schedule": "*/10 * * * *" },
+    { "path": "/api/poll?brand=downtowndry", "schedule": "5-59/10 * * * *" }
   ],
   "functions": {
     "api/*.ts": { "maxDuration": 120 }

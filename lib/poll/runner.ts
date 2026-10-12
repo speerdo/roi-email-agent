@@ -16,12 +16,16 @@
 // no-card / no-draft policies.
 
 import type { ImapFlow } from 'imapflow';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { getDb } from '../db.js';
-import { emailQueue, emailSyncState } from '../../db/schema.js';
+import { emailQueue, emailSyncState, newsletterSubscribers } from '../../db/schema.js';
 import { cleanBody } from '../mail/clean.js';
 import { runPrefilters } from '../mail/prefilter.js';
 import { classifyAndDraft, type ClassifyResult } from '../gemini/index.js';
+import { parseNewsletterSignup } from '../mail/newsletter.js';
+import { postPlainMessage } from '../discord/rest.js';
+import { requireBrandEnv } from '../brands/env.js';
+import { DEFAULT_BRAND, type BrandProfile } from '../brands/index.js';
 import { getEnv } from '../env.js';
 import { resolveCityPage } from '../site/resolveCityPage.js';
 import { renderRecyclingHelp, greetingName } from '../mail/templates/recyclingHelp.js';
@@ -175,6 +179,7 @@ export async function processMessage(
   policy: RoutingPolicy,
   summary: RunSummary,
   cardPoster?: CardPoster,
+  brand: BrandProfile = DEFAULT_BRAND,
 ): Promise<ProcessMessageResult> {
   summary.processed += 1;
 
@@ -249,9 +254,17 @@ export async function processMessage(
     subject: msg.subject ?? '',
     from: { address: msg.fromAddr, name: msg.fromName },
     contentType: msg.contentType,
-  });
+  }, brand);
 
   if (pre.matched) {
+    // DowntownDry newsletter signups: skip + mark read like any pre-filter
+    // hit, but ALSO capture the subscriber (upsert; announce only on first
+    // sighting). Capture failure must NOT lose the skip — it's logged and
+    // the row still lands.
+    if (pre.category === 'newsletter' && brand.newsletterSubscribers) {
+      await captureNewsletterSubscriber(brand, msg, summary);
+    }
+
     const rowId = await insertRow({
       messageId,
       imapUid: msg.uid,
@@ -268,6 +281,7 @@ export async function processMessage(
       inReplyTo: msg.inReplyTo,
       emailReferences: msg.references,
       receivedAt: msg.receivedAt,
+      brand,
     });
 
     if (rowId === null) {
@@ -293,15 +307,18 @@ export async function processMessage(
     };
   }
 
-  // SPEC §3.11 filter-drift detection: a Web3Forms message whose subject
-  // looks like a recycling request did NOT match the recycling pre-filter.
-  // Usually means the form's subject template changed and 300+ form
-  // submissions/yr are about to start hitting Gemini + generating cards.
-  // Scope to "subject looks like a recycling request" so the legitimate
-  // contact-form mail (which also comes from notify@web3forms.com) doesn't
-  // trip the warning.
+  // SPEC §3.11 filter-drift detection (ROI only): a Web3Forms message whose
+  // subject looks like a recycling request did NOT match the recycling
+  // pre-filter. Usually means the form's subject template changed and 300+
+  // form submissions/yr are about to start hitting Gemini + generating
+  // cards. Scope to "subject looks like a recycling request" so the
+  // legitimate contact-form mail doesn't trip the warning. Sender check
+  // matches the @web3forms.com DOMAIN, not the notify@ local part —
+  // Web3Forms plus-addresses per form key
+  // (e.g. notify+kjvf7p@web3forms.com for DD).
   if (
-    msg.fromAddr.toLowerCase().includes('notify@web3forms.com') &&
+    brand.id === DEFAULT_BRAND.id &&
+    /@web3forms\.com/i.test(msg.fromAddr) &&
     /^recycling request from/i.test(msg.subject ?? '')
   ) {
     const drift = `filter drift: uid=${msg.uid} from web3forms with recycling-shaped subject "${(msg.subject ?? '').slice(0, 80)}" did NOT match the recycling pre-filter — check AUTOMATED_FORM_SUBJECTS`;
@@ -316,7 +333,7 @@ export async function processMessage(
       from: msg.fromAddr,
       subject: msg.subject ?? '',
       snippet,
-    });
+    }, brand);
   } catch (err) {
     const e = err as Error;
     recordError(summary, {
@@ -351,12 +368,14 @@ export async function processMessage(
 
   // 4. Insert the row as pending, then apply routing.
   //
-  // recycling_help override (SPEC §2.5-2.7): the LLM is barred from
-  // emitting a recycleoldtech.com URL for this category (a hallucinated
-  // path 404s and the lead is dead). It outputs structured location
-  // fields; code resolves the URL deterministically from the site index
-  // and composes the reply from a fixed template. The model's draft is
-  // discarded; the routing label is persisted for the card + audit.
+  // recycling_help override (SPEC §2.5-2.7, ROI only): the LLM is barred
+  // from emitting a recycleoldtech.com URL for this category (a
+  // hallucinated path 404s and the lead is dead). It outputs structured
+  // location fields; code resolves the URL deterministically from the site
+  // index and composes the reply from a fixed template. The model's draft
+  // is discarded; the routing label is persisted for the card + audit.
+  // The branch cannot fire for DD anyway — recycling_help is not in DD's
+  // category set, so parseClassifyResult maps it to 'other'.
   let draftReply = classify.draft_reply || null;
   let routingLabel = '';
   let locationHint: unknown = null;
@@ -407,6 +426,7 @@ export async function processMessage(
     locationHint,
     resolvedCityUrl,
     routingLabel: routingLabel || null,
+    brand,
   });
 
   if (rowId === null) {
@@ -510,6 +530,86 @@ export async function processMessage(
   };
 }
 
+// ---- Newsletter capture (brand.newsletterSubscribers) ---------------------
+
+/**
+ * Upsert a newsletter subscriber for a brand and announce the FIRST
+ * sighting to the brand's Discord channel as a plain one-line message:
+ * `📬 New newsletter subscriber: <email> (<Page>)`. A repeat signup
+ * (same brand + email) updates last_seen_at and is NOT re-announced.
+ *
+ * Best-effort: a DB or Discord failure logs against the summary but never
+ * loses the underlying skip/mark-read handling of the message itself.
+ */
+async function captureNewsletterSubscriber(
+  brand: BrandProfile,
+  msg: FetchedMessage,
+  summary: RunSummary,
+): Promise<void> {
+  const signup = parseNewsletterSignup(msg.textSnippet || msg.text, msg.subject ?? '');
+  if (!signup) {
+    const warn = `newsletter pre-filter matched but no parsable signup (uid=${msg.uid}, subject="${(msg.subject ?? '').slice(0, 80)}")`;
+    summary.filterDriftWarnings.push(warn);
+    console.warn(`[poll] ${warn}`);
+    return;
+  }
+
+  try {
+    const existing = await db()
+      .select({ id: newsletterSubscribers.id })
+      .from(newsletterSubscribers)
+      .where(
+        and(
+          eq(newsletterSubscribers.brand, brand.id),
+          eq(newsletterSubscribers.email, signup.email),
+        ),
+      )
+      .limit(1);
+
+    if (existing.length > 0 && existing[0]) {
+      await db()
+        .update(newsletterSubscribers)
+        .set({ lastSeenAt: new Date(), sourcePage: signup.sourcePage })
+        .where(eq(newsletterSubscribers.id, existing[0].id));
+      return; // Repeat signup: refresh, do not re-announce.
+    }
+
+    await db().insert(newsletterSubscribers).values({
+      brand: brand.id,
+      email: signup.email,
+      sourcePage: signup.sourcePage,
+    });
+  } catch (err) {
+    const e = err as Error;
+    console.error(`[poll] newsletter upsert failed (uid=${msg.uid}):`, e.message);
+    recordError(summary, {
+      uid: msg.uid,
+      stage: 'newsletter-upsert',
+      message: e.message,
+    });
+    return; // Don't announce a signup we failed to persist.
+  }
+
+  // First sighting: announce. Best-effort — a Discord outage must not
+  // fail the poll tick.
+  try {
+    const { discordChannelId } = requireBrandEnv(brand);
+    const page = signup.sourcePage ? ` (${signup.sourcePage})` : '';
+    await postPlainMessage(
+      discordChannelId,
+      `📬 New newsletter subscriber: ${signup.email}${page}`,
+    );
+  } catch (err) {
+    const e = err as Error;
+    console.warn(`[poll] newsletter announce failed (uid=${msg.uid}):`, e.message);
+    recordError(summary, {
+      uid: msg.uid,
+      stage: 'newsletter-announce',
+      message: e.message,
+    });
+  }
+}
+
 // ---- Row insert helper ----------------------------------------------------
 
 interface InsertRowInput {
@@ -533,6 +633,9 @@ interface InsertRowInput {
   locationHint?: unknown;
   resolvedCityUrl?: string | null;
   routingLabel?: string | null;
+  /** Owning brand. Optional at the type level so error-path callers can
+   *  omit it; inserts without it land as 'roi' (the column default). */
+  brand?: BrandProfile;
 }
 
 /**
@@ -546,6 +649,7 @@ async function insertRow(input: InsertRowInput): Promise<string | null> {
       .insert(emailQueue)
       .values({
         messageId: input.messageId,
+        brand: input.brand?.id ?? 'roi',
         imapUid: input.imapUid,
         fromAddr: input.fromAddr,
         fromName: input.fromName,
@@ -604,12 +708,13 @@ export async function runBatch(
   policy: RoutingPolicy,
   summary: RunSummary,
   cardPoster?: CardPoster,
+  brand: BrandProfile = DEFAULT_BRAND,
 ): Promise<{ highestPersistedUid: number | null; seenUids: number[] }> {
   const seenUids: number[] = [];
   for await (const msg of messages) {
     let result: ProcessMessageResult;
     try {
-      result = await processMessage(msg, client, mailbox, policy, summary, cardPoster);
+      result = await processMessage(msg, client, mailbox, policy, summary, cardPoster, brand);
     } catch (err) {
       // Poison-message guard (SPEC §3.5), second layer. Parse failures are
       // already handled upstream (lib/imap.ts yields a degraded message

@@ -1,4 +1,5 @@
 import { getCommaList, getBool } from '../env.js';
+import { DEFAULT_BRAND, type BrandProfile } from '../brands/index.js';
 import type { ParsedFrom } from './clean.js';
 
 // ---- Types ----------------------------------------------------------------
@@ -20,7 +21,7 @@ export type PrefilterResult = PrefilterMatch | PrefilterNoMatch;
 
 // ---- Config (read once, cached) -----------------------------------------
 
-interface FilterConfig {
+export interface FilterConfig {
   automatedFormSubjects: string[];
   automatedFormFrom: string;        // single substring, lowercased
   automatedFormMarkRead: boolean;
@@ -34,6 +35,30 @@ interface FilterConfig {
 
 let configCache: FilterConfig | null = null;
 
+/**
+ * Per-brand config resolution. ROI (and only ROI) reads its config from
+ * the AUTOMATED_FORM_* / NEWSLETTER_* / DMARC_* env vars exactly as before
+ * multi-brand — ops can tune ROI without a deploy. Every other brand uses
+ * its BrandProfile's static prefilter config verbatim.
+ */
+export function prefilterConfigFor(brand: BrandProfile): FilterConfig {
+  if (brand.envPrefix === '') {
+    return loadEnvConfig();
+  }
+  const pf = brand.prefilter;
+  return {
+    automatedFormSubjects: pf.automatedFormSubjects.map((s) => s.toLowerCase()),
+    automatedFormFrom: pf.automatedFormFrom.toLowerCase(),
+    automatedFormMarkRead: pf.automatedFormMarkRead,
+    newsletterFrom: pf.newsletterFrom.toLowerCase(),
+    newsletterSubjects: pf.newsletterSubjects.map((s) => s.toLowerCase()),
+    newsletterMarkRead: pf.newsletterMarkRead,
+    dmarcSubjects: pf.dmarcSubjects.map((s) => s.toLowerCase()),
+    dmarcFrom: pf.dmarcFrom.toLowerCase(),
+    dmarcMarkRead: pf.dmarcMarkRead,
+  };
+}
+
 // NOTE on caching: configCache is process-lifetime. On Vercel Fluid
 // Compute a warm instance keeps stale pre-filter env after an env var
 // change until the instance recycles. Acceptable for the pre-filter
@@ -41,7 +66,7 @@ let configCache: FilterConfig | null = null;
 // misrouted single message), but worth knowing when debugging a "why
 // didn't the new NEWSLETTER_FROM take effect" report. resetPrefilterConfig()
 // is the test-only escape hatch.
-function loadConfig(): FilterConfig {
+function loadEnvConfig(): FilterConfig {
   if (configCache) return configCache;
   // NOTE: we read pre-filter env vars directly via process.env rather than
   // getEnv() — pre-filters only need their own config subset, and forcing
@@ -74,8 +99,12 @@ export function resetPrefilterConfig(): void {
  * substring match in the sender address. Both required — see plan §7a
  * shared-inbox caution.
  */
-export function matchRecyclingRequest(subject: string, fromAddress: string): boolean {
-  const cfg = loadConfig();
+export function matchRecyclingRequest(
+  subject: string,
+  fromAddress: string,
+  brand: BrandProfile = DEFAULT_BRAND,
+): boolean {
+  const cfg = prefilterConfigFor(brand);
   const subj = subject.toLowerCase();
   const from = fromAddress.toLowerCase();
   if (!cfg.automatedFormFrom || !from.includes(cfg.automatedFormFrom)) return false;
@@ -86,8 +115,12 @@ export function matchRecyclingRequest(subject: string, fromAddress: string): boo
  * Newsletter: sender contains NEWSLETTER_FROM OR subject matches a
  * NEWSLETTER_SUBJECTS entry (when any are set).
  */
-export function matchNewsletter(subject: string, fromAddress: string): boolean {
-  const cfg = loadConfig();
+export function matchNewsletter(
+  subject: string,
+  fromAddress: string,
+  brand: BrandProfile = DEFAULT_BRAND,
+): boolean {
+  const cfg = prefilterConfigFor(brand);
   const subj = subject.toLowerCase();
   const from = fromAddress.toLowerCase();
   if (cfg.newsletterFrom && from.includes(cfg.newsletterFrom)) return true;
@@ -101,8 +134,12 @@ export function matchNewsletter(subject: string, fromAddress: string): boolean {
  * DMARC report: subject contains any DMARC_SUBJECTS entry; AND sender
  * contains DMARC_FROM when set (when unset, subject match alone suffices).
  */
-export function matchDmarc(subject: string, fromAddress: string): boolean {
-  const cfg = loadConfig();
+export function matchDmarc(
+  subject: string,
+  fromAddress: string,
+  brand: BrandProfile = DEFAULT_BRAND,
+): boolean {
+  const cfg = prefilterConfigFor(brand);
   const subj = subject.toLowerCase();
   const from = fromAddress.toLowerCase();
   const subjectHit = cfg.dmarcSubjects.some((s) => subj.includes(s));
@@ -147,12 +184,15 @@ export interface PrefilterInput {
  * Run all pre-filters in plan order: recycling, newsletter, dmarc, bounce.
  * Only the FIRST match wins; everything else falls through to the LLM.
  */
-export function runPrefilters(msg: PrefilterInput): PrefilterResult {
+export function runPrefilters(
+  msg: PrefilterInput,
+  brand: BrandProfile = DEFAULT_BRAND,
+): PrefilterResult {
   const subject = msg.subject ?? '';
   const fromAddress = msg.from.address ?? '';
-  const cfg = loadConfig();
+  const cfg = prefilterConfigFor(brand);
 
-  if (matchRecyclingRequest(subject, fromAddress)) {
+  if (matchRecyclingRequest(subject, fromAddress, brand)) {
     return {
       matched: true,
       category: 'recycling_request',
@@ -161,7 +201,7 @@ export function runPrefilters(msg: PrefilterInput): PrefilterResult {
     };
   }
 
-  if (matchNewsletter(subject, fromAddress)) {
+  if (matchNewsletter(subject, fromAddress, brand)) {
     return {
       matched: true,
       category: 'newsletter',
@@ -170,7 +210,7 @@ export function runPrefilters(msg: PrefilterInput): PrefilterResult {
     };
   }
 
-  if (matchDmarc(subject, fromAddress)) {
+  if (matchDmarc(subject, fromAddress, brand)) {
     return {
       matched: true,
       category: 'dmarc',

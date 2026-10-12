@@ -12,6 +12,9 @@ export const DOWNTOWNDRY_BRAND: BrandProfile = {
   id: 'downtowndry',
   domain: 'downtowndry.bar',
   fromName: 'Downtown Dry',
+  // DD_EMAIL_USER / DD_EMAIL_PASS / DD_DISCORD_CHANNEL_ID. Missing vars =>
+  // getBrandEnv returns null and the poll skips DD cleanly (200, not 500).
+  envPrefix: 'DD',
 
   systemPrompt: `You are the email assistant for DowntownDry.bar. You triage inbound email and
 draft replies AS Downtown Dry, in Adam's voice (friendly, professional, concise,
@@ -107,15 +110,33 @@ not provide, and do not add location/items/help_type fields.`,
     'other',
   ],
 
+  // DD's pre-filter config, used verbatim by runPrefilters (non-ROI brands
+  // do NOT read the AUTOMATED_FORM_* / NEWSLETTER_* env vars). The
+  // content-pack rules:
+  //   - NO automated-form skip: the contact form must reach Gemini. An
+  //     empty subjects list / empty from means the filter never matches.
+  //   - Newsletter matches on SUBJECT only ("New Newsletter Subscriber");
+  //     never on the Web3Forms sender alone, or it would swallow every
+  //     contact-form message (they share the sender). NEWSLETTER_FROM is
+  //     deliberately empty.
+  //   - DMARC and bounce are identical to ROI (shared infrastructure mail).
   prefilter: {
-    // DD has no automated-form (recycling-request style) skip; the contact
-    // form must reach Gemini. The mark-read flags mirror ROI's so the
-    // pre-filter driver's shape is unchanged; Task 3 supplies DD's
-    // newsletter subject list (NEWSLETTER_FROM empty).
+    automatedFormSubjects: [],
+    automatedFormFrom: '',
     automatedFormMarkRead: true,
+    newsletterFrom: '',
+    newsletterSubjects: ['New Newsletter Subscriber'],
     newsletterMarkRead: true,
+    dmarcSubjects: ['Report domain:', 'Report Domain:'],
+    dmarcFrom: '',
     dmarcMarkRead: true,
   },
+
+  cardPrefix: '[DD]',
+
+  // Newsletter signups are captured (newsletter_subscribers upsert + a
+  // one-line Discord announcement). See lib/poll/runner.ts.
+  newsletterSubscribers: true,
 
   signature: {
     name: 'Adam',

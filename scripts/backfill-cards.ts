@@ -18,6 +18,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { getDb } from '../lib/db.js';
 import { emailQueue } from '../db/schema.js';
 import { postCard } from '../lib/discord/rest.js';
+import { getBrand } from '../lib/brands/index.js';
 
 async function main() {
   const db = getDb();
@@ -33,6 +34,7 @@ async function main() {
       bodySnippet: emailQueue.bodySnippet,
       receivedAt: emailQueue.receivedAt,
       routingLabel: emailQueue.routingLabel,
+      brand: emailQueue.brand,
     })
     .from(emailQueue)
     .where(and(eq(emailQueue.status, 'pending'), isNull(emailQueue.discordMessageId)));
@@ -72,7 +74,7 @@ async function main() {
         bodySnippet: r.bodySnippet,
         receivedAt: r.receivedAt,
         routing: r.routingLabel,
-      });
+      }, getBrand(r.brand ?? 'roi'));
       await db
         .update(emailQueue)
         .set({ discordMessageId: result.messageId, updatedAt: new Date() })

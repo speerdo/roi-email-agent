@@ -10,6 +10,9 @@ export const ROI_BRAND: BrandProfile = {
   id: 'roi',
   domain: 'recycleoldtech.com',
   fromName: 'RecycleOldTech',
+  // '' = use the shared EMAIL_* / DISCORD_* vars, exactly as before
+  // multi-brand. See lib/brands/env.ts.
+  envPrefix: '',
 
   systemPrompt: `You are the email assistant for RecycleOldTech.com. You triage inbound
 email and draft replies AS RecycleOldTech, in Adam's voice (friendly,
@@ -133,11 +136,26 @@ categories, omit these fields or set them to null.`,
     'other',
   ],
 
+  // ROI's pre-filter config is resolved from the AUTOMATED_FORM_* /
+  // NEWSLETTER_* / DMARC_* env vars at runtime (see prefilterConfigFor) —
+  // the static values below are documentation of the deployed defaults
+  // and are NOT read for roi.
   prefilter: {
+    automatedFormSubjects: ['Recycling request from'],
+    automatedFormFrom: 'notify@web3forms.com',
     automatedFormMarkRead: true,
+    newsletterFrom: 'wasteadvantagemag.com',
+    newsletterSubjects: [],
     newsletterMarkRead: true,
+    dmarcSubjects: ['Report domain:', 'Report Domain:'],
+    dmarcFrom: '',
     dmarcMarkRead: true,
   },
+
+  cardPrefix: '[ROI]',
+
+  // ROI has no newsletter-capture product; its newsletters are marked read.
+  newsletterSubscribers: false,
 
   signature: {
     name: 'Adam',
