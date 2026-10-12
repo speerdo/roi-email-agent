@@ -3,11 +3,12 @@ import type { Transporter } from 'nodemailer';
 import { getEnv } from './env.js';
 import { appendSent } from './imap.js';
 import { replyInReplyTo, replyReferences, replySubject } from './mail/headers.js';
+import { DEFAULT_BRAND } from './brands/index.js';
 import {
-  TEXT_SIGNATURE,
   buildHtmlBody,
   signatureAttachment,
   stripDraftSignoff,
+  textSignature,
 } from './mail/signature.js';
 
 // ---- Public types ---------------------------------------------------------
@@ -57,7 +58,7 @@ function getTransport(): Transporter {
 /**
  * Send a reply via PrivateEmail SMTP, threaded to the inbound message via
  * In-Reply-To + References headers. Per plan §11, the display name is
- * "RecycleOldTech" and the from address is EMAIL_USER.
+ * the brand's fromName and the from address is EMAIL_USER.
  *
  * Threading headers (SPEC §3.3): the reply's In-Reply-To is the INBOUND
  * message's Message-ID (NOT the inbound's In-Reply-To, which points at
@@ -75,7 +76,8 @@ export async function sendReply(input: SendReplyInput): Promise<SendReplyResult>
   const env = getEnv();
   const transport = getTransport();
 
-  const from = `"RecycleOldTech" <${env.EMAIL_USER}>`;
+  const brand = DEFAULT_BRAND;
+  const from = `"${brand.fromName}" <${env.EMAIL_USER}>`;
 
   // Derive threading headers from the inbound row. These MUST come from
   // row.messageId (the inbound's own ID) and row.emailReferences (the
@@ -97,9 +99,9 @@ export async function sendReply(input: SendReplyInput): Promise<SendReplyResult>
   // email agree; this call is the defensive second pass that also covers
   // rows written before that and is a no-op on an already-clean body.
   const body = stripDraftSignoff(input.text);
-  const text = `${body}\n${TEXT_SIGNATURE}`;
-  const html = buildHtmlBody(body);
-  const attachments = [signatureAttachment()];
+  const text = `${body}\n${textSignature(brand)}`;
+  const html = buildHtmlBody(body, brand);
+  const attachments = [signatureAttachment(brand)];
 
   const info = await transport.sendMail({
     from,
