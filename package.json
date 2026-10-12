@@ -22,6 +22,7 @@
     "backfill:cards": "tsx scripts/backfill-cards.ts",
     "refresh:cards": "tsx scripts/refresh-cards.ts",
     "backfill:reply-to": "tsx scripts/backfill-reply-to.ts",
+    "backfill:signoff": "tsx scripts/backfill-signoff.ts",
     "reconcile:seen": "tsx scripts/reconcile-seen.ts",
     "retry:errors": "tsx scripts/retry-errors.ts",
     "bounce:digest": "tsx scripts/bounce-digest.ts",

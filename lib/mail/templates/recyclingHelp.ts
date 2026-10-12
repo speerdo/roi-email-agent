@@ -7,11 +7,11 @@
 // lead is dead, so the LLM is barred from emitting any recycleoldtech.com
 // URL for this flow. See docs/SPEC_TRIAGE_FIXES.md §2.5-2.6.
 //
-// House style from lib/gemini/prompt.ts applies: no em dashes, sign off
-// "RecycleOldTech / Adam" — same as the model's own drafts. lib/smtp.ts
-// strips that sign-off on send (the branded signature block from
-// lib/mail/signature.ts replaces it), but drafts and Discord cards show
-// the draft verbatim, so the sign-off stays part of the template here.
+// House style from lib/gemini/prompt.ts applies: no em dashes, and NO
+// sign-off. The branded signature block (lib/mail/signature.ts) is
+// appended at send time and already carries the name, brand and site, so
+// a sign-off here would render twice. The template ends on the last line
+// of the body; stripDraftSignoff() is the backstop, not the mechanism.
 
 import type { ResolvedCityPage } from '../../site/resolveCityPage.js';
 import { canonicalStateName } from '../../site/cityIndex.js';
@@ -89,10 +89,6 @@ e-waste ourselves, but we can point you to the recyclers near you that do.
 
 Two ways to get specifics:`;
 
-  const closing = `
-
-RecycleOldTech / Adam`;
-
   // Name the place in template A so the reader can verify we understood
   // where they are before clicking (and tell us if we got it wrong).
   const cityLabel = (() => {
@@ -114,7 +110,7 @@ RecycleOldTech / Adam`;
 
 2. Or just reply to this email with your zip code, what you are recycling,
    and whether you want to drop off or have it picked up. We will look it
-   up and send you the options.${closing}`;
+   up and send you the options.`;
 
     case 'B': {
       const states = ambiguousStates.length > 0
@@ -131,7 +127,7 @@ RecycleOldTech / Adam`;
 
 2. Or just reply to this email with your state, zip code, what you are
    recycling, and whether you want to drop off or have it picked up. We
-   will look it up and send you the options.${closing}`;
+   will look it up and send you the options.`;
     }
 
     case 'C':
@@ -145,7 +141,7 @@ RecycleOldTech / Adam`;
 
 2. Or just reply to this email with your zip code, what you are recycling,
    and whether you want to drop off or have it picked up. We will look it
-   up and send you the options.${closing}`;
+   up and send you the options.`;
 
     case 'D':
       return `${opening}
@@ -155,6 +151,6 @@ RecycleOldTech / Adam`;
 
 2. Or reply to this email with what you are recycling and whether you
    want to drop off or have it picked up, and we will look it up and send
-   you the options.${closing}`;
+   you the options.`;
   }
 }

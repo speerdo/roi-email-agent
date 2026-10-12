@@ -37,19 +37,57 @@ function logoBuffer(): Buffer {
 }
 
 /**
- * The "RecycleOldTech / Adam" sign-off Gemini and the recycling templates
- * append to every draft. Once the branded signature block is appended at
- * SMTP time, the sign-off is redundant (Adam Speer appears in the real
- * signature below it), so it is stripped before sending — see
- * stripDraftSignoff().
+ * The canonical house sign-off. Kept exported because it names the exact
+ * wording the recycling templates and older stored drafts use; the
+ * stripper below matches a wider family than this one string.
  */
 export const DRAFT_SIGNOFF = 'RecycleOldTech / Adam';
 
 /**
- * Remove the house sign-off ("RecycleOldTech / Adam") from the end of a
- * draft. The branded signature block appended at SMTP time already
- * includes Adam's name, so keeping the sign-off would render it twice in
- * a row:
+ * Trailing lines that are a sign-off rather than body text. Matched
+ * against a normalized line (trimmed, leading dash/bullet removed,
+ * trailing punctuation removed, lowercased) so "- Adam", "Adam." and
+ * "adam" all collapse to the same shape.
+ *
+ * Only ever applied to lines at the END of a draft (see
+ * stripDraftSignoff), so a body sentence that happens to be short is
+ * safe — the walk stops at the first line that is not a sign-off.
+ */
+const SIGNOFF_LINES: RegExp[] = [
+  // The house sign-off, either order, any slash/dash spacing.
+  /^recycleoldtech(?:\.com)?\s*[/|-]\s*adam(?: speer)?$/,
+  /^adam(?: speer)?\s*[/|-]\s*recycleoldtech(?:\.com)?$/,
+  // Either half alone, for the "Adam" over "RecycleOldTech" variant the
+  // model produces when it ignores the exact wording.
+  /^(?:the )?recycleoldtech(?:\.com)?(?: team)?$/,
+  /^adam(?: speer)?$/,
+  // A bare valediction with nothing after it. Must match the WHOLE line:
+  // "Thanks again for reaching out!" is body text and stays.
+  /^(?:thanks|thanks again|thank you|thank you again|many thanks|thanks so much|best|best regards|kind regards|warm regards|warmly|regards|cheers|sincerely|all the best|talk soon)$/,
+];
+
+/**
+ * The most trailing non-blank lines we will drop. A real sign-off block
+ * is at most a valediction + name + brand (3); the cap keeps a
+ * pathological draft made entirely of short lines from being eaten.
+ */
+const MAX_SIGNOFF_LINES = 4;
+
+function isSignoffLine(line: string): boolean {
+  const normalized = line
+    .trim()
+    .replace(/^[-–—*]\s*/, '')
+    .replace(/[.,!;:]+$/, '')
+    .trim()
+    .toLowerCase();
+  if (normalized === '') return false;
+  return SIGNOFF_LINES.some((re) => re.test(normalized));
+}
+
+/**
+ * Remove the sign-off block from the end of a draft. The branded
+ * signature appended at SMTP time already carries Adam's name and the
+ * brand, so a sign-off left in the body renders twice in a row:
  *
  *   We appreciate you thinking of us.
  *   RecycleOldTech / Adam        <- duplicated, looks broken
@@ -58,16 +96,35 @@ export const DRAFT_SIGNOFF = 'RecycleOldTech / Adam';
  *   RecycleOldTech
  *   https://recycleoldtech.com
  *
- * Tolerates trailing whitespace/newlines and optional surrounding blank
- * lines. Nothing else in the body is touched — the sign-off is only ever
- * the last non-empty line, and the pattern is exact so a mid-body "made
- * by RecycleOldTech / Adam & sons" would never match.
+ * The model does not reliably emit the exact house wording — observed
+ * drafts have ended "Adam", "Adam\nRecycleOldTech", and a dangling
+ * "Best regards," with no name at all — so this walks trailing lines and
+ * drops every one that is a sign-off (see SIGNOFF_LINES), stopping at the
+ * first line of real body text. Nothing before that line is touched, so a
+ * mid-body "RecycleOldTech / Adam was here" survives.
+ *
+ * Applied where the draft is STORED (lib/poll/runner.ts, the Discord edit
+ * modal) so the card, the modal and the sent email all show the same
+ * body, and again in lib/smtp.ts as a defensive pass for rows written
+ * before that.
  */
 export function stripDraftSignoff(draft: string): string {
-  return draft
-    .replace(/[ \t]+$/gm, '')
-    .replace(new RegExp(`(?:\\n*${DRAFT_SIGNOFF}[ \\t]*\\n*)+$`), '')
-    .trimEnd();
+  const lines = draft.replace(/[ \t]+$/gm, '').split('\n');
+  let dropped = 0;
+  while (lines.length > 0 && dropped < MAX_SIGNOFF_LINES) {
+    // `?? ''` only satisfies noUncheckedIndexedAccess; length > 0 above.
+    const last = lines[lines.length - 1] ?? '';
+    if (last.trim() === '') {
+      // Blank lines between/after sign-off lines are free — they do not
+      // count against the cap and never stop the walk on their own.
+      lines.pop();
+      continue;
+    }
+    if (!isSignoffLine(last)) break;
+    lines.pop();
+    dropped++;
+  }
+  return lines.join('\n').trimEnd();
 }
 
 /**

@@ -15,6 +15,7 @@ import { emailQueue } from '../db/schema.js';
 import { sendReply } from '../lib/smtp.js';
 import { withImap, markSeen } from '../lib/imap.js';
 import { replyRecipient } from '../lib/mail/recipient.js';
+import { stripDraftSignoff } from '../lib/mail/signature.js';
 import {
   verifyInteraction,
   parseCustomId,
@@ -512,10 +513,18 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
     return;
   }
 
+  // Strip the sign-off before storing, exactly as the poller does for a
+  // fresh draft (lib/poll/runner.ts): the branded signature block carries
+  // the name, and storing the stripped text is what keeps the card, this
+  // modal and the email the recipient gets identical. Falls back to the
+  // submitted text if stripping would empty the draft.
+  const strippedSubmit = stripDraftSignoff(submitted);
+  const draft = strippedSubmit.trim() === '' ? submitted : strippedSubmit;
+
   // Update the row's draft_reply with the edited text.
   await db
     .update(emailQueue)
-    .set({ draftReply: submitted, updatedAt: new Date() })
+    .set({ draftReply: draft, updatedAt: new Date() })
     .where(eq(emailQueue.id, queueId));
 
   const cardRow: CardRow = {
@@ -525,7 +534,7 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
     replyTo: row.replyTo,
     subject: row.subject,
     category: row.category,
-    draftReply: submitted,
+    draftReply: draft,
     bodySnippet: row.bodySnippet,
     receivedAt: row.receivedAt,
     routing: row.routingLabel,
@@ -559,7 +568,7 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
     const send = await sendReply({
       to: recipient.to,
       subject: row.subject ?? '(no subject)',
-      text: submitted,
+      text: draft,
       inboundMessageId: row.messageId,
       inboundReferences: row.emailReferences ?? undefined,
     });

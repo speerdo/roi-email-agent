@@ -364,12 +364,24 @@ Notes:
 ### 2.6 The reply templates
 
 Deterministic, composed in `lib/mail/templates/recyclingHelp.ts`, not by
-Gemini. House style from `lib/gemini/prompt.ts` applies: no em dashes, sign off
-`RecycleOldTech / Adam`. That sign-off stays in the draft (it is what Adam
-reviews on the Discord card); at SMTP time `lib/smtp.ts` strips it and appends
-the branded signature block from `lib/mail/signature.ts`, which already carries
-Adam's name. The HTML part is built as real `<p>` paragraphs — the earlier
-`<pre>` + `white-space:pre-wrap` wrapper was stripped by Open-Xchange webmail
+Gemini. House style from `lib/gemini/prompt.ts` applies: no em dashes, and **no
+sign-off** — the templates and the model both end on the last line of the body,
+and `lib/mail/signature.ts` appends the branded signature (name, brand, site,
+inline logo) at send time.
+
+The sign-off is stripped where the draft is **stored** (`lib/poll/runner.ts`
+for a fresh draft, the edit-modal handler in `api/discord.ts` for an edited
+one), not only at send time. Stripping only at send — the first cut of this fix
+— left the Discord card, the "Sent" card and the edit modal showing a
+`RecycleOldTech / Adam` the recipient never received, which reads as the bug
+never having been fixed. `stripDraftSignoff()` runs again in `lib/smtp.ts` as a
+defensive pass for rows written before that, and matches a family of sign-offs
+rather than one exact string: the model has also produced `Adam`,
+`Adam\nRecycleOldTech`, and a dangling `Best regards,` with no name at all.
+`npm run backfill:signoff` normalizes pending rows queued before the change.
+
+The HTML part is built as real `<p>` paragraphs — the earlier `<pre>` +
+`white-space:pre-wrap` wrapper was stripped by Open-Xchange webmail
 (PrivateEmail), collapsing the whole reply into one line.
 
 **Template A — city page resolved.** Both options, form first:
@@ -391,8 +403,6 @@ Two ways to get specifics:
 2. Or just reply to this email with your zip code, what you are recycling,
    and whether you want to drop off or have it picked up. We will look it up
    and send you the options.
-
-RecycleOldTech / Adam
 ```
 
 **Template B — ambiguous city:** same shape, but option 1 becomes "let us know

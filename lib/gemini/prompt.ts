@@ -4,7 +4,10 @@
 //
 // House style rules to preserve across edits:
 //   - No em dashes ("--" or "—" must NOT appear in draft_reply output).
-//   - Sign off as RecycleOldTech / Adam.
+//   - NO sign-off in draft_reply. The branded signature block
+//     (lib/mail/signature.ts) is appended at send time and already
+//     carries the name, brand and site; anything the model signs is
+//     stripped by stripDraftSignoff() before the draft is stored.
 //   - Listing request drafts MUST point at https://recycleoldtech.com/claims
 //     and NOT ask the recycler to email details back (the form captures them).
 //   - Out-of-scope replies are short, polite, honest declines that do NOT
@@ -94,9 +97,11 @@ A genuine e-waste business asking to be listed (even if cold) is a
 listing_request and IS reply-worthy. Judge by intent and relevance to an
 e-waste directory, not by whether it was solicited.
 
-Sign off every draft as "RecycleOldTech / Adam" (that exact sign-off, not just
-"Adam" and not the website domain alone). EXCEPT for recycling_help, where you
-leave draft_reply empty (code signs it).
+Do NOT sign off. End draft_reply with the last sentence of the body: no
+"Thanks," no "Best regards," no name and no brand line. Code appends the
+real signature (name, brand, site, logo) after your text, so a sign-off from
+you would show up twice. For recycling_help, leave draft_reply empty
+entirely (code composes that whole reply).
 
 Return ONLY JSON, no markdown fences:
 {

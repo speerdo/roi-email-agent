@@ -25,6 +25,7 @@ import { classifyAndDraft, type ClassifyResult } from '../gemini/index.js';
 import { getEnv } from '../env.js';
 import { resolveCityPage } from '../site/resolveCityPage.js';
 import { renderRecyclingHelp, greetingName } from '../mail/templates/recyclingHelp.js';
+import { stripDraftSignoff } from '../mail/signature.js';
 import {
   type RunSummary,
   newRunSummary,
@@ -373,6 +374,18 @@ export async function processMessage(
     routingLabel = resolved.routingLabel;
     locationHint = classify.location ?? null;
     resolvedCityUrl = resolved.url;
+  }
+
+  // Strip the sign-off ONCE, here, before the draft is stored. The Discord
+  // card, the edit modal and the outbound email all read this stored row,
+  // so stripping only at send time (as we did originally) left the card
+  // showing a "RecycleOldTech / Adam" the recipient never actually got.
+  // The branded signature block in lib/mail/signature.ts carries the name.
+  // A draft that is nothing BUT a sign-off is kept as-is rather than
+  // stored empty, which the approve path would refuse to send.
+  if (draftReply) {
+    const stripped = stripDraftSignoff(draftReply);
+    draftReply = stripped.trim() === '' ? draftReply : stripped;
   }
 
   const rowId = await insertRow({

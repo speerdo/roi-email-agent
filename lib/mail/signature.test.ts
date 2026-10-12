@@ -30,6 +30,49 @@ describe('stripDraftSignoff', () => {
   it('strips sign-off even when it is the only line', () => {
     expect(stripDraftSignoff(DRAFT_SIGNOFF)).toBe('');
   });
+
+  // The variants below are all real drafts observed in the queue: the
+  // model does not reliably emit the exact house wording, and the
+  // original exact-match stripper let every one of these through.
+  it('strips the reversed "Adam" over "RecycleOldTech" block', () => {
+    const draft = "Send it over and we'll review to see if it's a good fit.\n\nThanks again!\n\nAdam\nRecycleOldTech";
+    expect(stripDraftSignoff(draft)).toBe("Send it over and we'll review to see if it's a good fit.");
+  });
+
+  it('strips a bare first-name sign-off', () => {
+    expect(stripDraftSignoff('Some of them offer pickup for a fee.\n\nAdam')).toBe(
+      'Some of them offer pickup for a fee.',
+    );
+    expect(stripDraftSignoff('Best of luck to you.\n\n- Adam')).toBe('Best of luck to you.');
+  });
+
+  it('strips a dangling valediction with no name after it', () => {
+    const draft = "We don't buy or sell used electronics ourselves.\n\nBest regards,";
+    expect(stripDraftSignoff(draft)).toBe("We don't buy or sell used electronics ourselves.");
+  });
+
+  it('strips "Adam Speer" and slash variants in either order', () => {
+    expect(stripDraftSignoff('Body.\n\nAdam / RecycleOldTech')).toBe('Body.');
+    expect(stripDraftSignoff('Body.\n\nRecycleOldTech/Adam')).toBe('Body.');
+    expect(stripDraftSignoff('Body.\n\nAdam Speer\nRecycleOldTech.com')).toBe('Body.');
+    expect(stripDraftSignoff('Body.\n\nThe RecycleOldTech Team')).toBe('Body.');
+  });
+
+  it('keeps a valediction-shaped line that is a real sentence', () => {
+    const draft = 'Thanks again for reaching out about the listing!';
+    expect(stripDraftSignoff(draft)).toBe(draft);
+  });
+
+  it('keeps body text that merely ends near a name', () => {
+    const draft = 'Reply with your zip and we will send the options.';
+    expect(stripDraftSignoff(draft)).toBe(draft);
+  });
+
+  it('stops at the first real line and never eats the body', () => {
+    // Cap is 4 trailing sign-off lines; a short-lined body survives.
+    const draft = 'Adam is the person who runs this.\n\nWe can help.';
+    expect(stripDraftSignoff(draft)).toBe(draft);
+  });
 });
 
 describe('draftToHtml', () => {

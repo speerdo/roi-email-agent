@@ -4,10 +4,10 @@ import { getEnv } from './env.js';
 import { appendSent } from './imap.js';
 import { replyInReplyTo, replyReferences, replySubject } from './mail/headers.js';
 import {
-  DRAFT_SIGNOFF,
   TEXT_SIGNATURE,
   buildHtmlBody,
   signatureAttachment,
+  stripDraftSignoff,
 } from './mail/signature.js';
 
 // ---- Public types ---------------------------------------------------------
@@ -90,12 +90,13 @@ export async function sendReply(input: SendReplyInput): Promise<SendReplyResult>
   // inline-embedded logo via cid:signature-logo. Email clients that
   // block remote images by default still render inline cid: attachments.
   //
-  // The house sign-off ("RecycleOldTech / Adam") is stripped before both
-  // builds: the signature block below it already carries Adam's name, so
-  // leaving the sign-off in would show it twice in a row. DRAFT_SIGNOFF
-  // is imported verbatim rather than duplicated here so a future sign-off
-  // wording change updates both prompt and stripper in one place.
-  const body = input.text.replace(new RegExp(`\\s*${DRAFT_SIGNOFF}\\s*$`), '').trimEnd();
+  // The sign-off is stripped before both builds: the signature block
+  // below it already carries Adam's name, so leaving it in would show it
+  // twice in a row. Drafts are normally stripped when they are STORED
+  // (lib/poll/runner.ts and the Discord edit modal) so the card and the
+  // email agree; this call is the defensive second pass that also covers
+  // rows written before that and is a no-op on an already-clean body.
+  const body = stripDraftSignoff(input.text);
   const text = `${body}\n${TEXT_SIGNATURE}`;
   const html = buildHtmlBody(body);
   const attachments = [signatureAttachment()];
