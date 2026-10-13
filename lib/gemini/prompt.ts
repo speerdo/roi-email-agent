@@ -25,6 +25,10 @@
 
 import { DEFAULT_BRAND } from '../brands/index.js';
 
+/** Back-compat export: the DEFAULT_BRAND (ROI) prompt. The live classify
+ *  path uses the per-brand profile instead — classifyAndDraft(msg, brand)
+ *  sends brand.systemPrompt — so this only matters for scripts/tests that
+ *  still import it. */
 export const SYSTEM_PROMPT = DEFAULT_BRAND.systemPrompt;
 
 /**

@@ -30,5 +30,19 @@ export function getBrand(id: string): BrandProfile {
   return brand;
 }
 
+/** Non-throwing variant for untrusted input (?brand= query params).
+ *  Returns null on an unknown id so callers can 400 cleanly. */
+export function tryGetBrand(id: string | undefined): BrandProfile | null {
+  if (!id) return DEFAULT_BRAND;
+  return REGISTRY[id] ?? null;
+}
+
+/** Per-brand poll cursor key. Each brand owns an independent lastUid so
+ *  DD's poll never resumes from ROI's position (or vice versa).
+ *  Migration 0005 adopts the pre-existing ROI row under this key. */
+export function syncKeyFor(brand: BrandProfile): string {
+  return `${brand.id}:INBOX`;
+}
+
 /** The brand used until Task 3 lands the multi-brand wiring. */
 export const DEFAULT_BRAND = ROI_BRAND;

@@ -26,8 +26,11 @@ import {
   editCard,
   deferInteraction,
   buildResolvedCardPayload,
+  cardTitle,
   type CardRow,
 } from '../lib/discord/rest.js';
+import { getBrand, type BrandProfile } from '../lib/brands/index.js';
+import { getBrandEnv } from '../lib/brands/env.js';
 import { getDiscordEnv } from '../types/env.js';
 
 // Disable body parsing — we need the raw body for Ed25519 verification.
@@ -182,6 +185,26 @@ async function loadRowForCard(queueId: string) {
   return row;
 }
 
+/**
+ * Resolve the row's brand profile + per-brand env. Rows written before
+ * migration 0005 carry the 'roi' column default, so `?? 'roi'` only guards
+ * a hypothetically-null value. The brand drives SMTP credentials, From
+ * name, signature and the Discord channel fallback.
+ */
+function rowBrand(row: NonNullable<Awaited<ReturnType<typeof loadRowForCard>>>): {
+  brand: BrandProfile;
+  brandEnv: ReturnType<typeof getBrandEnv>;
+} {
+  const brand = getBrand(row.brand ?? 'roi');
+  return { brand, brandEnv: getBrandEnv(brand) };
+}
+
+/** Per-brand IMAP auth for markSeen (the row lives in that brand's mailbox). */
+function imapAuthFor(brandEnv: ReturnType<typeof getBrandEnv>): { user: string; pass: string } | undefined {
+  if (!brandEnv) return undefined;
+  return { user: brandEnv.emailUser, pass: brandEnv.emailPass };
+}
+
 function rowToCardRow(row: typeof emailQueue.$inferSelect): CardRow {
   return {
     id: row.id,
@@ -217,7 +240,6 @@ async function handleApprove(i: AnyInteraction, queueId: string, res: VercelResp
 
 async function doApproveWork(queueId: string, i: AnyInteraction): Promise<void> {
   const db = getDb();
-  const channelId = i.message?.channel_id ?? getDiscordEnv().DISCORD_CHANNEL_ID;
 
   // Idempotency claim (SPEC §3.4): a double-tap on Approve (or a Discord
   // interaction retry) used to send the reply twice because the buttons
@@ -250,6 +272,11 @@ async function doApproveWork(queueId: string, i: AnyInteraction): Promise<void> 
     console.error(`[discord] approve: row ${queueId} vanished after claim`);
     return;
   }
+  const { brand, brandEnv } = rowBrand(row);
+  // Approve/edit/reject cards are edited in the channel the card lives in;
+  // the brand channel is only the fallback when the interaction carries
+  // no channel (shouldn't happen for component interactions).
+  const channelId = i.message?.channel_id ?? brandEnv?.discordChannelId ?? getDiscordEnv().DISCORD_CHANNEL_ID;
   if (!row.draftReply) {
     console.error(`[discord] approve: row ${queueId} has no draft`);
     // Revert the claim so the row stays retryable.
@@ -285,7 +312,7 @@ async function doApproveWork(queueId: string, i: AnyInteraction): Promise<void> 
         .where(eq(emailQueue.id, queueId));
       await editCard(channelId, i.message?.id ?? '', {
         embeds: [{
-          title: row.subject ?? '(no subject)',
+          title: cardTitle(row.subject, brand.cardPrefix),
           description: `⚠️ Not sent: ${reason}`,
           color: 0xb91c1c,
         }],
@@ -300,11 +327,16 @@ async function doApproveWork(queueId: string, i: AnyInteraction): Promise<void> 
       text: row.draftReply,
       inboundMessageId: row.messageId,
       inboundReferences: row.emailReferences ?? undefined,
+      brand,
     });
 
-    // Mark the inbound read (real email marked read ONLY here, per plan).
+    // Mark the inbound read (real email marked read ONLY here, per plan),
+    // in the OWNING brand's mailbox.
     if (row.imapUid !== null) {
-      await withImap((client) => markSeen(client, 'INBOX', row.imapUid as number));
+      await withImap(
+        (client) => markSeen(client, 'INBOX', row.imapUid as number),
+        imapAuthFor(brandEnv),
+      );
     }
 
     // Update DB row.
@@ -318,7 +350,7 @@ async function doApproveWork(queueId: string, i: AnyInteraction): Promise<void> 
       .where(eq(emailQueue.id, queueId));
 
     // Edit the card to show "Sent" + strip buttons.
-    await editCard(channelId, i.message?.id ?? '', buildResolvedCardPayload(cardRow, 'sent'));
+    await editCard(channelId, i.message?.id ?? '', buildResolvedCardPayload(cardRow, 'sent', brand.cardPrefix));
     console.log(`[discord] approve sent for ${queueId} (msg ${i.message?.id})`);
     void send;
   } catch (err) {
@@ -339,7 +371,7 @@ async function doApproveWork(queueId: string, i: AnyInteraction): Promise<void> 
     try {
       await editCard(channelId, i.message?.id ?? '', {
         embeds: [{
-          title: row.subject ?? '(no subject)',
+          title: cardTitle(row.subject, brand.cardPrefix),
           description: '⚠️ Send failed — see logs. Buttons remain so you can retry.',
           color: 0xb91c1c,
         }],
@@ -372,14 +404,19 @@ async function doRejectWork(queueId: string, i: AnyInteraction): Promise<void> {
     return;
   }
 
+  const { brand, brandEnv } = rowBrand(row);
   const db = getDb();
-  const channelId = i.message?.channel_id ?? getDiscordEnv().DISCORD_CHANNEL_ID;
+  const channelId = i.message?.channel_id ?? brandEnv?.discordChannelId ?? getDiscordEnv().DISCORD_CHANNEL_ID;
   const cardRow = rowToCardRow(row);
 
-  // No SMTP. Mark inbound read (Adam has seen it via the card).
+  // No SMTP. Mark inbound read (Adam has seen it via the card), in the
+  // OWNING brand's mailbox.
   if (row.imapUid !== null) {
     try {
-      await withImap((client) => markSeen(client, 'INBOX', row.imapUid as number));
+      await withImap(
+        (client) => markSeen(client, 'INBOX', row.imapUid as number),
+        imapAuthFor(brandEnv),
+      );
     } catch (err) {
       console.error('[discord] reject markSeen failed:', (err as Error).message);
     }
@@ -394,7 +431,7 @@ async function doRejectWork(queueId: string, i: AnyInteraction): Promise<void> {
     })
     .where(eq(emailQueue.id, queueId));
 
-  await editCard(channelId, i.message?.id ?? '', buildResolvedCardPayload(cardRow, 'rejected'));
+  await editCard(channelId, i.message?.id ?? '', buildResolvedCardPayload(cardRow, 'rejected', brand.cardPrefix));
   console.log(`[discord] rejected ${queueId} (msg ${i.message?.id})`);
 }
 
@@ -472,7 +509,6 @@ async function handleEditSubmit(i: AnyInteraction, queueId: string, res: VercelR
 
 async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<void> {
   const db = getDb();
-  const channelId = i.message?.channel_id ?? getDiscordEnv().DISCORD_CHANNEL_ID;
 
   // Idempotency claim (SPEC §3.4) — same pattern as doApproveWork: a
   // double-tap on the modal submit (or a Discord retry) must not send
@@ -500,6 +536,8 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
     console.error(`[discord] edit_submit: row ${queueId} vanished after claim`);
     return;
   }
+  const { brand, brandEnv } = rowBrand(row);
+  const channelId = i.message?.channel_id ?? brandEnv?.discordChannelId ?? getDiscordEnv().DISCORD_CHANNEL_ID;
 
   // Extract the submitted draft text from the modal's components.
   const submitted = extractModalValue(i.data?.components, 'draft_text');
@@ -556,7 +594,7 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
         .where(eq(emailQueue.id, queueId));
       await editCard(channelId, i.message?.id ?? '', {
         embeds: [{
-          title: row.subject ?? '(no subject)',
+          title: cardTitle(row.subject, brand.cardPrefix),
           description: `⚠️ Not sent: ${reason}`,
           color: 0xb91c1c,
         }],
@@ -571,10 +609,14 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
       text: draft,
       inboundMessageId: row.messageId,
       inboundReferences: row.emailReferences ?? undefined,
+      brand,
     });
 
     if (row.imapUid !== null) {
-      await withImap((client) => markSeen(client, 'INBOX', row.imapUid as number));
+      await withImap(
+        (client) => markSeen(client, 'INBOX', row.imapUid as number),
+        imapAuthFor(brandEnv),
+      );
     }
 
     await db
@@ -588,7 +630,7 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
 
     // Edit the original card (the one the Edit button was on, NOT a new
     // message). For modal submits, `i.message` is the original card.
-    await editCard(channelId, i.message?.id ?? '', buildResolvedCardPayload(cardRow, 'sent_edited'));
+    await editCard(channelId, i.message?.id ?? '', buildResolvedCardPayload(cardRow, 'sent_edited', brand.cardPrefix));
     console.log(`[discord] edit_submit sent for ${queueId} (msg ${i.message?.id})`);
     void send;
   } catch (err) {
@@ -605,7 +647,7 @@ async function doEditSubmitWork(queueId: string, i: AnyInteraction): Promise<voi
       .where(eq(emailQueue.id, queueId));
     await editCard(channelId, i.message?.id ?? '', {
       embeds: [{
-        title: row.subject ?? '(no subject)',
+        title: cardTitle(row.subject, brand.cardPrefix),
         description: '⚠️ Send failed (edited) — see logs.',
         color: 0xb91c1c,
       }],

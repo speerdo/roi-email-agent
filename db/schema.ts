@@ -1,9 +1,14 @@
-import { pgTable, uuid, text, integer, boolean, timestamp, jsonb, index } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, text, integer, boolean, timestamp, jsonb, index, uniqueIndex } from 'drizzle-orm/pg-core';
 
 // email_queue — one row per inbound message (real, skipped, or error).
 // status values: pending | approved | rejected | sent | skipped | error
 //   (plus 'sending' as a transient claim state for Approve idempotency —
 //   see api/discord.ts handleApprove conditional-write guard).
+// brand: which brand profile owns the row ('roi' | 'downtowndry'). Drives
+//   the SMTP credentials, From name, signature, Discord channel and
+//   prefilter/Gemini config used at approve time (api/discord.ts loads the
+//   row, then getBrand(row.brand)). Default 'roi' covers all pre-existing
+//   rows (migration 0005).
 // category values: recycling_help | recycling_request | newsletter | dmarc |
 //   bounce | spam | listing_request | partner_inquiry | support | claim |
 //   out_of_scope | other
@@ -16,6 +21,7 @@ import { pgTable, uuid, text, integer, boolean, timestamp, jsonb, index } from '
 // (kept as text rather than pg enums for v2 extendability — see plan §6)
 export const emailQueue = pgTable('email_queue', {
   id: uuid('id').primaryKey().defaultRandom(),
+  brand: text('brand').notNull().default('roi'),
   messageId: text('message_id').unique().notNull(),
   imapUid: integer('imap_uid'),
   fromAddr: text('from_addr').notNull(),
@@ -57,13 +63,36 @@ export const emailQueue = pgTable('email_queue', {
   receivedAtIdx: index('email_queue_received_at_idx').on(t.receivedAt),
 }));
 
-// email_sync_state — incremental poller cursor. One row per mailbox key
-// (e.g. "hello@recycleoldtech.com/INBOX"). Backlog modes do NOT touch this.
+// email_sync_state — incremental poller cursor. One row per sync key.
+// Key format: `<brand>:INBOX` (e.g. "roi:INBOX") since Task 3 — each brand
+// polls its own mailbox and MUST NOT reuse another brand's lastUid.
+// Migration 0005 COPIES the pre-existing ROI row
+// (previously keyed `hello@recycleoldtech.com/INBOX`) to `roi:INBOX` —
+// a copy, not a rename, so code live during the migration/deploy gap keeps
+// finding its key. The old row is deleted manually after cutover.
+// Backlog modes do NOT touch this.
 export const emailSyncState = pgTable('email_sync_state', {
   mailbox: text('mailbox').primaryKey(),
   lastUid: integer('last_uid').default(0),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
+
+// newsletter_subscribers — per-brand newsletter capture (DowntownDry).
+// When a DD message matches the newsletter pre-filter (subject contains
+// "New Newsletter Subscriber"), the runner parses the subscriber address
+// (`email : x` in the body) and the page name (subject suffix), and
+// upserts a row here. unique(brand, email): a repeat signup updates
+// last_seen_at and is NOT re-announced.
+export const newsletterSubscribers = pgTable('newsletter_subscribers', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  brand: text('brand').notNull(),
+  email: text('email').notNull(),
+  sourcePage: text('source_page'),
+  firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).defaultNow().notNull(),
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  brandEmailIdx: uniqueIndex('newsletter_subscribers_brand_email_idx').on(t.brand, t.email),
+}));
 
 // alert_state — de-duplication state for the Discord error alert, one row
 // per alert key (the poller uses its mailbox key). Cron runs every 10
@@ -93,3 +122,5 @@ export type EmailSyncStateRow = typeof emailSyncState.$inferSelect;
 export type NewEmailSyncStateRow = typeof emailSyncState.$inferInsert;
 export type AlertStateRow = typeof alertState.$inferSelect;
 export type NewAlertStateRow = typeof alertState.$inferInsert;
+export type NewsletterSubscriberRow = typeof newsletterSubscribers.$inferSelect;
+export type NewNewsletterSubscriberRow = typeof newsletterSubscribers.$inferInsert;

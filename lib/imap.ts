@@ -34,6 +34,14 @@ export interface FetchedMessage {
   parseError: string | undefined;
 }
 
+/** Per-connection mailbox credentials. Lets a caller connect as a
+ *  non-default brand's mailbox (e.g. DD_EMAIL_USER) while host/port stay
+ *  shared. Omit for the shared EMAIL_USER / EMAIL_PASS. */
+export interface ImapAuth {
+  user: string;
+  pass: string;
+}
+
 export interface FetchSinceOpts {
   /** Cap on messages per fetch call. Helps keep serverless runs bounded. */
   limit?: number;
@@ -52,13 +60,15 @@ export interface FetchByDateOpts {
 
 // ---- Client lifecycle -----------------------------------------------------
 
-function baseOptions(): ImapFlowOptions {
+function baseOptions(auth?: ImapAuth): ImapFlowOptions {
   const env = getEnv();
   return {
     host: env.EMAIL_IMAP_HOST,
     port: env.EMAIL_IMAP_PORT,
     secure: true,
-    auth: { user: env.EMAIL_USER, pass: env.EMAIL_PASS },
+    // Per-brand mailbox credentials. Undefined => the shared EMAIL_USER /
+    // EMAIL_PASS (ROI, unchanged). Host/port stay shared.
+    auth: auth ?? { user: env.EMAIL_USER, pass: env.EMAIL_PASS },
     logger: false,
     disableAutoIdle: true,
     // ImapFlow defaults to a 300000ms (5 minute) socket timeout. In a
@@ -108,8 +118,8 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * here only logs: the same error also rejects whatever command was in
  * flight, which is what propagates to the caller's try/catch.
  */
-export function connectImap(): ImapFlow {
-  const client = new ImapFlow(baseOptions());
+export function connectImap(auth?: ImapAuth): ImapFlow {
+  const client = new ImapFlow(baseOptions(auth));
   client.on('error', (err: Error) => {
     console.error('[imap] connection error:', err.message);
   });
@@ -135,11 +145,11 @@ export function connectImap(): ImapFlow {
  * performs side effects (row inserts, Discord card posts, \\Seen flagging)
  * that are not idempotent, so retrying it could double-post.
  */
-async function connectWithRetry(): Promise<ImapFlow> {
+async function connectWithRetry(auth?: ImapAuth): Promise<ImapFlow> {
   let lastErr: Error | undefined;
 
   for (let attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt++) {
-    const client = connectImap();
+    const client = connectImap(auth);
     let timer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
@@ -186,8 +196,11 @@ async function connectWithRetry(): Promise<ImapFlow> {
  * connectWithRetry), runs the callback with the client, always closes the
  * connection in finally.
  */
-export async function withImap<T>(fn: (client: ImapFlow) => Promise<T>): Promise<T> {
-  const client = await connectWithRetry();
+export async function withImap<T>(
+  fn: (client: ImapFlow) => Promise<T>,
+  auth?: ImapAuth,
+): Promise<T> {
+  const client = await connectWithRetry(auth);
   try {
     return await fn(client);
   } finally {
