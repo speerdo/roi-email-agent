@@ -1,6 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { getEnv } from '../env.js';
-import { SYSTEM_PROMPT, buildUserContent } from './prompt.js';
+import { DEFAULT_BRAND, type BrandProfile } from '../brands/index.js';
+import { buildUserContent } from './prompt.js';
 
 // ---- Public types ---------------------------------------------------------
 
@@ -26,7 +27,11 @@ export interface ClassifyLocation {
 }
 
 export interface ClassifyResult {
-  category: GeminiCategory;
+  /** One of the brand's categories (lib/brands/<brand>.ts categories).
+   *  Kept as plain string so per-brand category vocabularies typecheck;
+   *  parseClassifyResult guarantees membership in the brand's set
+   *  (falling back to 'other'). */
+  category: string;
   should_reply: boolean;
   draft_reply: string;
   reason: string;
@@ -75,7 +80,10 @@ export function resetGeminiClient(): void {
 
 // ---- Helpers --------------------------------------------------------------
 
-const VALID_CATEGORIES: ReadonlySet<string> = new Set<GeminiCategory>([
+/** ROI's category set. Used as the default when no brand is supplied
+ *  (back-compat for scripts/tests); the live poll path always passes the
+ *  brand profile, so VALID_CATEGORIES is effectively per brand. */
+const ROI_CATEGORIES: ReadonlySet<string> = new Set<GeminiCategory>([
   'recycling_help',
   'listing_request',
   'partner_inquiry',
@@ -85,6 +93,11 @@ const VALID_CATEGORIES: ReadonlySet<string> = new Set<GeminiCategory>([
   'spam',
   'other',
 ]);
+
+function validCategoriesFor(brand?: BrandProfile): ReadonlySet<string> {
+  if (!brand) return ROI_CATEGORIES;
+  return new Set<string>(brand.categories);
+}
 
 /**
  * Defensive JSON parse: strip accidental markdown fences, ignore trailing
@@ -96,7 +109,10 @@ const VALID_CATEGORIES: ReadonlySet<string> = new Set<GeminiCategory>([
  * JSON.parse; on parse failure, set category=other, should_reply=false,
  * log raw."
  */
-export function parseClassifyResult(raw: string): ClassifyResult {
+export function parseClassifyResult(
+  raw: string,
+  validCategories: ReadonlySet<string> = ROI_CATEGORIES,
+): ClassifyResult {
   const trimmed = raw.trim();
   // Strip ``` fences if present (model occasionally wraps despite
   // responseMimeType=application/json).
@@ -156,9 +172,7 @@ export function parseClassifyResult(raw: string): ClassifyResult {
 
   const obj = parsed as Record<string, unknown>;
   const rawCategory = typeof obj.category === 'string' ? obj.category : 'other';
-  const category: GeminiCategory = VALID_CATEGORIES.has(rawCategory)
-    ? (rawCategory as GeminiCategory)
-    : 'other';
+  const category: string = validCategories.has(rawCategory) ? rawCategory : 'other';
   const should_reply = obj.should_reply === true;
   const draft_reply = typeof obj.draft_reply === 'string' ? obj.draft_reply : '';
   const reason = typeof obj.reason === 'string' ? obj.reason : '';
@@ -243,17 +257,21 @@ function isRetryableGeminiError(err: unknown): boolean {
  * true). For now both steps happen in this single call; the structure is
  * arranged so the split is a one-line change later — see draftOnly().
  */
-export async function classifyAndDraft(msg: ClassifyInput): Promise<ClassifyResult> {
+export async function classifyAndDraft(
+  msg: ClassifyInput,
+  brand: BrandProfile = DEFAULT_BRAND,
+): Promise<ClassifyResult> {
   const env = getEnv();
   const client = getClient();
   const contents = buildUserContent(msg);
+  const validCategories = validCategoriesFor(brand);
 
   const config = {
-    // SYSTEM_PROMPT (instructions only) goes via systemInstruction;
-    // `contents` carries just the email fields from buildUserContent.
-    // Keeping these separate avoids sending the (large) instruction
-    // block twice per call.
-    systemInstruction: SYSTEM_PROMPT,
+    // The brand's system prompt (instructions only) goes via
+    // systemInstruction; `contents` carries just the email fields from
+    // buildUserContent. Keeping these separate avoids sending the (large)
+    // instruction block twice per call.
+    systemInstruction: brand.systemPrompt,
     responseMimeType: 'application/json' as const,
     temperature: 0.2, // deterministic-leaning for classification
   };
@@ -293,7 +311,7 @@ export async function classifyAndDraft(msg: ClassifyInput): Promise<ClassifyResu
       raw: '',
     };
   }
-  return parseClassifyResult(text);
+  return parseClassifyResult(text, validCategories);
 }
 
 /**

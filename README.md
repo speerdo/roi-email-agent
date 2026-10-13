@@ -62,7 +62,9 @@ the four pre-filter blocks defaulted for RecycleOldTech:
   (provisioned in Phase 6, not needed for Phase 0-5).
 - `CRON_SECRET` — long random string guarding `/api/poll`.
 - `AUTOMATED_FORM_*`, `NEWSLETTER_*`, `DMARC_*` — deterministic
-  pre-filter config.
+  pre-filter config (ROI; other brands carry theirs in `lib/brands/`).
+- `DD_EMAIL_USER`, `DD_EMAIL_PASS`, `DD_DISCORD_CHANNEL_ID` — the
+  DowntownDry mailbox + approval channel (skipped cleanly when absent).
 
 ### 3. Preflight connectivity check
 
@@ -116,7 +118,11 @@ confirm the PING returns PONG.
 
 Once deployed to production:
 
-- **Cron:** registered in `vercel.json` (`/api/poll` at `*/10 * * * *`).
+- **Cron:** registered in `vercel.json` — `/api/poll` (ROI) at
+  `*/10 * * * *` and `/api/poll/downtowndry` at `5-59/10 * * * *`
+  (offset so the two brands never tick at the same minute-second; the
+  path-segment rewrite maps it to `/api/poll?brand=downtowndry` — cron
+  paths stay plain, `?brand=` remains supported in the handler).
   Confirmed in the Vercel dashboard → Cron Jobs tab (Vercel Pro required
   for sub-hourly).
 - **Discord Interactions Endpoint URL:** in the Discord Developer Portal →
@@ -142,9 +148,45 @@ Once deployed to production:
 
 ## Cron
 
-`vercel.json` defines a `*/10 * * * *` cron hitting `/api/poll`. The
-endpoint authorizes via the `Authorization: Bearer $CRON_SECRET` header
-(header-only; the secret is never accepted via query string).
+`vercel.json` defines two crons: `*/10 * * * *` hitting `/api/poll` (the
+ROI brand, the default when `?brand=` is absent) and `5-59/10 * * * *`
+hitting `/api/poll/downtowndry` (rewritten to
+`/api/poll?brand=downtowndry`; cron paths are plain path segments, while
+the handler keeps direct `?brand=` support). The endpoint authorizes via
+the `Authorization: Bearer $CRON_SECRET` header (header-only; the secret
+is never accepted via query string).
+
+### Multi-brand (Task 3)
+
+Each brand is a `BrandProfile` in `lib/brands/` (prompt, categories,
+pre-filter config, signature, per-brand env prefix). Per brand:
+
+- **Env:** ROI uses the shared `EMAIL_*` / `DISCORD_CHANNEL_ID` vars.
+  DowntownDry uses `DD_EMAIL_USER`, `DD_EMAIL_PASS`,
+  `DD_DISCORD_CHANNEL_ID`. A brand with missing vars is skipped cleanly
+  by its poll (`200 {"reason":"not_configured"}`, not a 500).
+- **Sync cursor:** `email_sync_state` is keyed `<brandId>:INBOX`
+  (`roi:INBOX`, `downtowndry:INBOX`) so mailboxes never share a lastUid.
+- **DB rows:** `email_queue.brand` records the owning brand; approve /
+  edit / reject load the row, resolve `getBrand(row.brand)` and send via
+  that brand's SMTP mailbox, From name and signature. Cards are titled
+  `[ROI] ...` / `[DD] ...` and post to the brand's own channel; alerts go
+  to the channel of the brand they came from.
+- **Pre-filters:** ROI still reads the `AUTOMATED_FORM_*` / `NEWSLETTER_*`
+  / `DMARC_*` env vars; DowntownDry uses its profile config (no form
+  filter; newsletter matches the subject `New Newsletter Subscriber`).
+  Web3Forms sender checks match the `@web3forms.com` DOMAIN, not the
+  `notify@` local part (DD's real sender is plus-addressed:
+  `notify+kjvf7p@web3forms.com`).
+- **Newsletter capture (DD):** a matched signup is parsed
+  (`email : x` body line, page name from the subject suffix), upserted
+  into `newsletter_subscribers` (unique per brand+email), and announced
+  once as `📬 New newsletter subscriber: x (Page)` to DD's channel.
+  Repeat signups refresh `last_seen_at` silently.
+- **Migrations:** `0005_multi_brand.sql` adds `email_queue.brand` and
+  `newsletter_subscribers`, and adopts the pre-existing ROI cursor row as
+  `roi:INBOX`. Apply with `npm run db:migrate` (coordinate with adam —
+  do not run ad hoc).
 
 This project targets **Vercel Pro** (sub-hourly cron + 60s
 `maxDuration`). If forking to Vercel Hobby (which allows 1 cron job at

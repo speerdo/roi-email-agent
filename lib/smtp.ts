@@ -3,11 +3,13 @@ import type { Transporter } from 'nodemailer';
 import { getEnv } from './env.js';
 import { appendSent } from './imap.js';
 import { replyInReplyTo, replyReferences, replySubject } from './mail/headers.js';
+import type { BrandProfile } from './brands/index.js';
+import { requireBrandEnv } from './brands/env.js';
 import {
-  DRAFT_SIGNOFF,
-  TEXT_SIGNATURE,
   buildHtmlBody,
   signatureAttachment,
+  stripDraftSignoff,
+  textSignature,
 } from './mail/signature.js';
 
 // ---- Public types ---------------------------------------------------------
@@ -29,6 +31,12 @@ export interface SendReplyInput {
    *  row.emailReferences). The outbound reply's References = this chain
    *  + inboundMessageId, per RFC 5322 §3.6.4. */
   inboundReferences?: string;
+  /** The brand that owns the row being replied to. Drives the SMTP
+   *  credentials (per-brand mailbox), the From display name and the
+   *  branded signature. Required — there is no default, so a caller that
+   *  forgets to load row.brand fails loudly instead of sending as the
+   *  wrong brand. */
+  brand: BrandProfile;
 }
 
 export interface SendReplyResult {
@@ -42,22 +50,24 @@ export interface SendReplyResult {
  * Created fresh on every call (no shared pool) — serverless-friendly, since
  * a pooled connection cached at module scope can go stale across cold starts.
  */
-function getTransport(): Transporter {
+function getTransport(brand: BrandProfile): Transporter {
   const env = getEnv();
+  const brandEnv = requireBrandEnv(brand);
   return nodemailer.createTransport({
     host: env.EMAIL_SMTP_HOST,
     port: env.EMAIL_SMTP_PORT,
     secure: true, // port 465 is implicit TLS
-    auth: { user: env.EMAIL_USER, pass: env.EMAIL_PASS },
+    auth: { user: brandEnv.emailUser, pass: brandEnv.emailPass },
   });
 }
 
 // ---- Public API -----------------------------------------------------------
 
 /**
- * Send a reply via PrivateEmail SMTP, threaded to the inbound message via
- * In-Reply-To + References headers. Per plan §11, the display name is
- * "RecycleOldTech" and the from address is EMAIL_USER.
+ * Send a reply via the brand's SMTP mailbox, threaded to the inbound
+ * message via In-Reply-To + References headers. The display name is the
+ * brand's fromName and the from address is that brand's mailbox user.
+ * Host/port, threading and signature handling are shared.
  *
  * Threading headers (SPEC §3.3): the reply's In-Reply-To is the INBOUND
  * message's Message-ID (NOT the inbound's In-Reply-To, which points at
@@ -72,10 +82,11 @@ function getTransport(): Transporter {
  * already sent, so we return `appendedToSent: false` and continue.
  */
 export async function sendReply(input: SendReplyInput): Promise<SendReplyResult> {
-  const env = getEnv();
-  const transport = getTransport();
+  const brand = input.brand;
+  const brandEnv = requireBrandEnv(brand);
+  const transport = getTransport(brand);
 
-  const from = `"RecycleOldTech" <${env.EMAIL_USER}>`;
+  const from = `"${brand.fromName}" <${brandEnv.emailUser}>`;
 
   // Derive threading headers from the inbound row. These MUST come from
   // row.messageId (the inbound's own ID) and row.emailReferences (the
@@ -90,15 +101,16 @@ export async function sendReply(input: SendReplyInput): Promise<SendReplyResult>
   // inline-embedded logo via cid:signature-logo. Email clients that
   // block remote images by default still render inline cid: attachments.
   //
-  // The house sign-off ("RecycleOldTech / Adam") is stripped before both
-  // builds: the signature block below it already carries Adam's name, so
-  // leaving the sign-off in would show it twice in a row. DRAFT_SIGNOFF
-  // is imported verbatim rather than duplicated here so a future sign-off
-  // wording change updates both prompt and stripper in one place.
-  const body = input.text.replace(new RegExp(`\\s*${DRAFT_SIGNOFF}\\s*$`), '').trimEnd();
-  const text = `${body}\n${TEXT_SIGNATURE}`;
-  const html = buildHtmlBody(body);
-  const attachments = [signatureAttachment()];
+  // The sign-off is stripped before both builds: the signature block
+  // below it already carries Adam's name, so leaving it in would show it
+  // twice in a row. Drafts are normally stripped when they are STORED
+  // (lib/poll/runner.ts and the Discord edit modal) so the card and the
+  // email agree; this call is the defensive second pass that also covers
+  // rows written before that and is a no-op on an already-clean body.
+  const body = stripDraftSignoff(input.text);
+  const text = `${body}\n${textSignature(brand)}`;
+  const html = buildHtmlBody(body, brand);
+  const attachments = [signatureAttachment(brand)];
 
   const info = await transport.sendMail({
     from,

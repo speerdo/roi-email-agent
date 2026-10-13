@@ -24,7 +24,8 @@ describe('renderRecyclingHelp', () => {
     expect(body).toContain('https://www.recycleoldtech.com/states/pennsylvania/greencastle#recycling-request-form');
     expect(body).toContain('Fill out the short form');
     expect(body).toContain('Or just reply');
-    expect(body).toContain('RecycleOldTech / Adam');
+    // No sign-off: lib/mail/signature.ts appends the real one at send time.
+    expect(body).not.toContain('RecycleOldTech / Adam');
     // No em dashes (house style).
     expect(body).not.toMatch(/--|—/);
   });
@@ -88,7 +89,7 @@ describe('renderRecyclingHelp', () => {
     });
     expect(body).toMatch(/^Hi,/);
     expect(body).toContain('Tell us your city and state');
-    expect(body).toContain('RecycleOldTech / Adam');
+    expect(body).not.toContain('RecycleOldTech / Adam');
   });
 });
 describe('greetingName', () => {

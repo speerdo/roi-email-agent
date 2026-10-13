@@ -9,6 +9,8 @@
 // share a connection (REST, not gateway — each call is its own HTTPS POST).
 
 import { getDiscordEnv } from '../../types/env.js';
+import { requireBrandEnv } from '../brands/env.js';
+import type { BrandProfile } from '../brands/index.js';
 import { buildCustomId } from './verify.js';
 import { InteractionResponseType, type InteractionType } from 'discord-interactions';
 import { recipientDisplay } from '../mail/recipient.js';
@@ -99,7 +101,20 @@ export function codeBlock(text: string, maxLen: number, emptyPlaceholder: string
  * original email snippet sits alongside it in a field so the reviewer can
  * judge alignment without leaving Discord.
  */
-export function buildCardPayload(row: CardRow): Record<string, unknown> {
+// ---- Card title -----------------------------------------------------------
+
+/**
+ * Build an embed title, applying the brand prefix ("[ROI]"/"[DD]") and the
+ * shared truncation cap. Used by BOTH card builders and the inline failure
+ * cards in api/discord.ts so a failure card keeps the same brand prefix as
+ * the card it edits.
+ */
+export function cardTitle(subject: string | null | undefined, prefix = ''): string {
+  const base = subject ?? '(no subject)';
+  return truncatePlain(prefix ? `${prefix} ${base}` : base, MAX_EMBED_TITLE);
+}
+
+export function buildCardPayload(row: CardRow, cardPrefix = ''): Record<string, unknown> {
   // Show the address an approved reply will actually go to. When Reply-To
   // differs from From (e.g. Web3Forms), this renders as
   // "submitter@example.com (via notify@web3forms.com)" so a reviewer can
@@ -126,7 +141,7 @@ export function buildCardPayload(row: CardRow): Record<string, unknown> {
   fields.push({ name: 'Original email', value: snippetBlock, inline: false });
 
   const embed = {
-    title: truncatePlain(row.subject ?? '(no subject)', MAX_EMBED_TITLE),
+    title: cardTitle(row.subject, cardPrefix),
     description: draftBlock,
     fields,
     color: 0x4f46e5, // indigo, just so cards are visually distinct from chat
@@ -166,7 +181,7 @@ export function buildCardPayload(row: CardRow): Record<string, unknown> {
  * Build the "after-action" payload that REPLACES the card's content:
  * strips the buttons, updates the embed to show outcome.
  */
-export function buildResolvedCardPayload(row: CardRow, outcome: 'sent' | 'sent_edited' | 'rejected' | 'send_failed'): Record<string, unknown> {
+export function buildResolvedCardPayload(row: CardRow, outcome: 'sent' | 'sent_edited' | 'rejected' | 'send_failed', cardPrefix = ''): Record<string, unknown> {
   const outcomeText = {
     sent: '✅ Sent',
     sent_edited: '✅ Sent (edited)',
@@ -193,7 +208,7 @@ export function buildResolvedCardPayload(row: CardRow, outcome: 'sent' | 'sent_e
   fields.push({ name: 'Original email', value: snippetBlock, inline: false });
 
   const embed = {
-    title: truncatePlain(row.subject ?? '(no subject)', MAX_EMBED_TITLE),
+    title: cardTitle(row.subject, cardPrefix),
     description: `${outcomeText}\n\n${draftBlock}`,
     fields,
     color: outcome === 'send_failed' ? 0xb91c1c : 0x16a34a,
@@ -207,15 +222,16 @@ export function buildResolvedCardPayload(row: CardRow, outcome: 'sent' | 'sent_e
 // ---- REST calls -----------------------------------------------------------
 
 /**
- * POST a new triage card to the configured approval channel. Returns the
- * message id Discord assigns so the caller can save it on the
+ * POST a new triage card to the brand's approval channel. The brand drives
+ * the channel (via its env config) and the card title prefix ("[ROI] ...").
+ * Returns the message id Discord assigns so the caller can save it on the
  * email_queue row for later edits.
  */
-export async function postCard(row: CardRow): Promise<PostedCard> {
-  const { DISCORD_CHANNEL_ID } = getDiscordEnv();
-  const payload = buildCardPayload(row);
+export async function postCard(row: CardRow, brand: BrandProfile): Promise<PostedCard> {
+  const { discordChannelId } = requireBrandEnv(brand);
+  const payload = buildCardPayload(row, brand.cardPrefix);
 
-  const r = await fetch(`${API_BASE}/channels/${DISCORD_CHANNEL_ID}/messages`, {
+  const r = await fetch(`${API_BASE}/channels/${discordChannelId}/messages`, {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify(payload),
@@ -228,6 +244,22 @@ export async function postCard(row: CardRow): Promise<PostedCard> {
 
   const body = (await r.json()) as { id: string; channel_id: string };
   return { messageId: body.id, channelId: body.channel_id };
+}
+
+/**
+ * POST a plain one-line message (not an embed card) to a channel. Used by
+ * the newsletter-subscriber announcement.
+ */
+export async function postPlainMessage(channelId: string, content: string): Promise<void> {
+  const r = await fetch(`${API_BASE}/channels/${channelId}/messages`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ content }),
+  });
+  if (!r.ok) {
+    const text = await r.text();
+    throw new Error(`discord postPlainMessage failed: ${r.status} ${text.slice(0, 300)}`);
+  }
 }
 
 /**

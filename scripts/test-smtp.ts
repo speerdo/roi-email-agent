@@ -9,6 +9,7 @@ import 'dotenv/config';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { sendReply } from '../lib/smtp.js';
+import { DEFAULT_BRAND } from '../lib/brands/index.js';
 
 function parseArgs(): { to?: string } {
   const args = process.argv.slice(2);
@@ -55,6 +56,7 @@ async function main() {
       'This is a test message from the RecycleOldTech email triage agent\'s ' +
       'SMTP path. If you received this, lib/smtp.ts works end-to-end.\n\n' +
       '(inReplyTo / references omitted — this is a standalone test, not a threaded reply.)',
+    brand: DEFAULT_BRAND,
   });
 
   console.log('\nsend result:');

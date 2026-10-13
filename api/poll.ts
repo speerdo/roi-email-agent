@@ -14,6 +14,8 @@ import {
   type CardPoster,
 } from '../lib/poll/runner.js';
 import { postCard } from '../lib/discord/rest.js';
+import { getBrand, tryGetBrand, syncKeyFor } from '../lib/brands/index.js';
+import { getBrandEnv } from '../lib/brands/env.js';
 import { toJSON, toDiscordLine } from '../lib/logging.js';
 import {
   fingerprintRun,
@@ -53,11 +55,13 @@ function cutoffDate(): Date {
 }
 
 /**
- * Per-plan §5, the incremental poller's mailbox key is
- * `${EMAIL_USER}/INBOX`. Backlog modes (Phase 8) reuse this convention.
+ * Per-plan §5, the incremental poller's mailbox key. Since Task 3 the
+ * sync cursor is scoped PER BRAND (`<brandId>:INBOX`) so each brand's
+ * mailbox resumes from its own lastUid — see lib/brands/index.ts
+ * syncKeyFor(). Migration 0005 adopts the pre-existing ROI row.
  */
-function mailboxKey(): string {
-  return `${getEnv().EMAIL_USER}/INBOX`;
+function mailboxKey(brand: ReturnType<typeof getBrand>): string {
+  return syncKeyFor(brand);
 }
 
 /**
@@ -119,8 +123,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return;
   }
 
+  // Brand routing: ?brand=<id>, defaulting to roi. An unknown id is a
+  // config/cron bug — 400 loudly rather than silently polling ROI.
+  const brandParam = typeof req.query.brand === 'string' ? req.query.brand : undefined;
+  const brand = tryGetBrand(brandParam);
+  if (!brand) {
+    res.status(400).json({ error: `unknown brand: ${brandParam}` });
+    return;
+  }
+
+  // Per-brand credentials. A brand whose vars are missing (e.g. DD before
+  // adam sets DD_*) is a clean skip: 200 with a note, NOT a 500 (a 500
+  // would make Vercel's cron retry fire on every tick).
+  const brandEnv = getBrandEnv(brand);
+  if (!brandEnv) {
+    console.log(`[poll] brand ${brand.id} not configured — skipping`);
+    res.status(200).json({ brand: brand.id, status: 'skipped', reason: 'not_configured' });
+    return;
+  }
+
   const mailbox = 'INBOX';
-  const key = mailboxKey();
+  const key = mailboxKey(brand);
   const startedAt = new Date();
 
   // 1. Sync state.
@@ -154,7 +177,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       bodySnippet: ctx.bodySnippet,
       receivedAt: ctx.receivedAt,
       routing: ctx.routing ?? null,
-    });
+    }, brand);
     await getDb()
       .update(emailQueue)
       .set({ discordMessageId: posted.messageId, updatedAt: new Date() })
@@ -177,6 +200,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // later run to re-walk the same already-handled messages via dedupe.
   let seenUids: number[] = [];
   try {
+    // Poll the OWNING brand's mailbox: same host/port, brand credentials.
     await withImap(async (client) => {
       // SPEC §3.7: detect mail this run is about to skip silently. The
       // fetch below constrains on BOTH `uid > lastUid` and `since cutoff`,
@@ -226,7 +250,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         limit: POLL_BATCH_LIMIT,
         since: cutoffDate(),
       });
-      const result = await runBatch(iter, client, mailbox, incrementalPolicy, summary, cardPoster);
+      const result = await runBatch(iter, client, mailbox, incrementalPolicy, summary, cardPoster, brand);
       seenUids = result.seenUids;
 
       // Flush all markRead UIDs in one batched IMAP command. The fetch
@@ -245,7 +269,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           recordError(summary, { stage: 'markseen', message: `markSeenBatch failed: ${e.message}` });
         }
       }
-    });
+    }, { user: brandEnv.emailUser, pass: brandEnv.emailPass });
   } catch (err) {
     const e = err as Error;
     // IMAP connection or fetch-level error. Record and continue below so we
@@ -297,7 +321,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // a sustained failure would otherwise post the same line six times an
   // hour until someone muted the channel. A changed condition still posts
   // immediately, and recovery is announced. See lib/alerts.ts.
-  await postAlert(summary, key);
+  // Alerts go to the channel of the brand they came from.
+  await postAlert(summary, key, brandEnv.discordChannelId);
 
   // Always 200 with the summary; a 500 would make Vercel's cron retry logic
   // fire and we don't want that for partial-success runs. Real catastrophic
@@ -311,9 +336,9 @@ const SUPPRESSION_WINDOW_LABEL = humanizeDuration(REMINDER_INTERVAL_MS);
 
 /** Send a message to the Discord approval channel. Throws on config gaps
  *  so the caller's best-effort catch logs them. */
-async function postToDiscord(content: string): Promise<void> {
-  const { DISCORD_CHANNEL_ID, DISCORD_BOT_TOKEN } = getDiscordEnv();
-  await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
+async function postToDiscord(channelId: string, content: string): Promise<void> {
+  const { DISCORD_BOT_TOKEN } = getDiscordEnv();
+  await fetch(`https://discord.com/api/v10/channels/${channelId}/messages`, {
     method: 'POST',
     headers: {
       Authorization: `Bot ${DISCORD_BOT_TOKEN}`,
@@ -333,7 +358,11 @@ async function postToDiscord(content: string): Promise<void> {
  * while a swallowed one is a missed outage. The whole thing is best-effort
  * — the poll has already done its real work by this point.
  */
-async function postAlert(summary: ReturnType<typeof newRunSummary>, key: string): Promise<void> {
+async function postAlert(
+  summary: ReturnType<typeof newRunSummary>,
+  key: string,
+  channelId: string,
+): Promise<void> {
   const fingerprint = fingerprintRun(summary);
 
   let prior: AlertStateRow | null = null;
@@ -380,6 +409,7 @@ async function postAlert(summary: ReturnType<typeof newRunSummary>, key: string)
     const since = humanizeDuration(now.getTime() - decision.firstSeenAt.getTime());
     try {
       await postToDiscord(
+        channelId,
         `✅ **recovered** ${key} — poll is clean again after ${decision.occurrences} failing run(s) over ${since}.`,
       );
     } catch (err) {
@@ -411,7 +441,7 @@ async function postAlert(summary: ReturnType<typeof newRunSummary>, key: string)
   }
 
   try {
-    await postToDiscord(parts.join(' '));
+    await postToDiscord(channelId, parts.join(' '));
   } catch (err) {
     // Non-fatal: the poll itself succeeded; the alert is best-effort.
     console.warn('[poll] error-alert Discord post failed:', (err as Error).message);

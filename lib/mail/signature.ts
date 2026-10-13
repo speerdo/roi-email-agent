@@ -4,21 +4,24 @@
 // Kept separate from the SMTP transport so editing the signature is a
 // one-file diff and so scripts/test-smtp.ts can reuse it for previews.
 //
-// The logo image is embedded as an INLINE attachment (cid:signature-logo)
-// rather than referenced by a remote URL — modern email clients (Gmail,
-// Outlook, Apple Mail) block remote images by default until the user
-// clicks "show images", but inline cid: attachments render immediately.
+// Every brand value (name, site, logo path) comes from a BrandProfile
+// (lib/brands/types.ts) — this module is brand-agnostic. The logo image
+// is embedded as an INLINE attachment (cid:...) rather than referenced by
+// a remote URL — modern email clients (Gmail, Outlook, Apple Mail) block
+// remote images by default until the user clicks "show images", but
+// inline cid: attachments render immediately.
 //
-// Path is resolved relative to the project root so it works both under
-// `vercel dev` (cwd = repo root) and in the Vercel build output.
+// Logo paths are resolved relative to the project root so they work both
+// under `vercel dev` (cwd = repo root) and in the Vercel build output.
 
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { DEFAULT_BRAND, type BrandProfile } from '../brands/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// lib/mail/ -> ../../assets/images/signature-logo.png
-const LOGO_PATH = resolve(__dirname, '../../assets/images/signature-logo.png');
+// lib/mail/ -> project root
+const PROJECT_ROOT = resolve(__dirname, '../..');
 
 export interface SignatureAttachment {
   filename: string;
@@ -28,61 +31,98 @@ export interface SignatureAttachment {
   encoding: string;
 }
 
-let cachedLogo: Buffer | null = null;
+const logoCache = new Map<string, Buffer>();
 
-function logoBuffer(): Buffer {
-  if (cachedLogo) return cachedLogo;
-  cachedLogo = readFileSync(LOGO_PATH);
-  return cachedLogo;
+function logoBuffer(logoPath: string): Buffer {
+  const cached = logoCache.get(logoPath);
+  if (cached) return cached;
+  const buf = readFileSync(resolve(PROJECT_ROOT, logoPath));
+  logoCache.set(logoPath, buf);
+  return buf;
 }
 
 /**
- * The "RecycleOldTech / Adam" sign-off Gemini and the recycling templates
- * append to every draft. Once the branded signature block is appended at
- * SMTP time, the sign-off is redundant (Adam Speer appears in the real
- * signature below it), so it is stripped before sending — see
- * stripDraftSignoff().
+ * Trailing lines that are a sign-off rather than body text. Matched
+ * against a normalized line (trimmed, leading dash/bullet removed,
+ * trailing punctuation removed, lowercased) so "- Adam", "Adam." and
+ * "adam" all collapse to the same shape.
+ *
+ * Only ever applied to lines at the END of a draft (see
+ * stripDraftSignoff), so a body sentence that happens to be short is
+ * safe — the walk stops at the first line that is not a sign-off.
+ *
+ * The per-brand patterns live in the BrandProfile (ROI carries the
+ * historical patterns too, so old drafts already in the queue — including
+ * the old "RecycleOldTech / Adam" house sign-off, which the current
+ * signature no longer emits — keep getting cleaned).
  */
-export const DRAFT_SIGNOFF = 'RecycleOldTech / Adam';
 
 /**
- * Remove the house sign-off ("RecycleOldTech / Adam") from the end of a
- * draft. The branded signature block appended at SMTP time already
- * includes Adam's name, so keeping the sign-off would render it twice in
- * a row:
- *
- *   We appreciate you thinking of us.
- *   RecycleOldTech / Adam        <- duplicated, looks broken
- *   --
- *   Adam Speer
- *   RecycleOldTech
- *   https://recycleoldtech.com
- *
- * Tolerates trailing whitespace/newlines and optional surrounding blank
- * lines. Nothing else in the body is touched — the sign-off is only ever
- * the last non-empty line, and the pattern is exact so a mid-body "made
- * by RecycleOldTech / Adam & sons" would never match.
+ * The most trailing non-blank lines we will drop. A real sign-off block
+ * is at most a valediction + name + brand (3); the cap keeps a
+ * pathological draft made entirely of short lines from being eaten.
  */
-export function stripDraftSignoff(draft: string): string {
-  return draft
-    .replace(/[ \t]+$/gm, '')
-    .replace(new RegExp(`(?:\\n*${DRAFT_SIGNOFF}[ \\t]*\\n*)+$`), '')
-    .trimEnd();
+const MAX_SIGNOFF_LINES = 4;
+
+function isSignoffLine(line: string, patterns: readonly RegExp[]): boolean {
+  const normalized = line
+    .trim()
+    .replace(/^[-–—*]\s*/, '')
+    .replace(/[.,!;:]+$/, '')
+    .trim()
+    .toLowerCase();
+  if (normalized === '') return false;
+  return patterns.some((re) => re.test(normalized));
+}
+
+/**
+ * Remove the sign-off block from the end of a draft. The branded
+ * signature appended at SMTP time already carries Adam's name, so a
+ * sign-off left in the body renders twice in a row.
+ *
+ * The model does not reliably emit one exact wording — observed drafts
+ * have ended "Adam", "Adam\nRecycleOldTech", and a dangling "Best
+ * regards," with no name at all — so this walks trailing lines and drops
+ * every one matching the brand's signoffPatterns, stopping at the first
+ * line of real body text. Nothing before that line is touched, so a
+ * mid-body "RecycleOldTech / Adam was here" survives.
+ *
+ * Applied where the draft is STORED (lib/poll/runner.ts, the Discord edit
+ * modal) so the card, the modal and the sent email all show the same
+ * body, and again in lib/smtp.ts as a defensive pass for rows written
+ * before that.
+ */
+export function stripDraftSignoff(
+  draft: string,
+  patterns: readonly RegExp[] = DEFAULT_BRAND.signoffPatterns,
+): string {
+  const lines = draft.replace(/[ \t]+$/gm, '').split('\n');
+  let dropped = 0;
+  while (lines.length > 0 && dropped < MAX_SIGNOFF_LINES) {
+    // `?? ''` only satisfies noUncheckedIndexedAccess; length > 0 above.
+    const last = lines[lines.length - 1] ?? '';
+    if (last.trim() === '') {
+      // Blank lines between/after sign-off lines are free — they do not
+      // count against the cap and never stop the walk on their own.
+      lines.pop();
+      continue;
+    }
+    if (!isSignoffLine(last, patterns)) break;
+    lines.pop();
+    dropped++;
+  }
+  return lines.join('\n').trimEnd();
 }
 
 /**
  * Plain-text signature block. Appended after the draft body with a
- * blank separator line. Kept short and ASCII-only so it reads cleanly
- * in plain-text clients and in the Discord card preview (which shows
- * the text part).
+ * blank separator line: the name on the first line, the site URL on the
+ * next. Kept short and ASCII-only so it reads cleanly in plain-text
+ * clients and in the Discord card preview (which shows the text part).
  */
-export const TEXT_SIGNATURE = [
-  '',
-  '--',
-  'Adam Speer',
-  'RecycleOldTech',
-  'https://recycleoldtech.com',
-].join('\n');
+export function textSignature(brand: BrandProfile = DEFAULT_BRAND): string {
+  return ['', '--', brand.signature.name, brand.signature.siteLabel].join('\n');
+}
 
 /**
  * Convert a plain-text draft into a paragraph-based HTML block. Drafts
@@ -120,18 +160,18 @@ export function draftToHtml(draftText: string): string {
 }
 
 /**
- * HTML signature block. Inline CSS keeps it self-contained — many email
- * clients strip <style> blocks.
+ * HTML signature block: name, linked site label, then the inline logo.
+ * Inline CSS keeps it self-contained — many email clients strip <style>
+ * blocks.
  */
-function signatureHtml(): string {
+function signatureHtml(brand: BrandProfile): string {
   return `
 <div style="margin-top:24px; border-top:1px solid #e5e7eb; padding-top:16px; ${FONT_STYLE}">
-  <div style="font-weight:bold; font-size:15px;">Adam Speer</div>
-  <div style="color:#4b5563;">RecycleOldTech</div>
+  <div style="font-weight:bold; font-size:15px;">${escapeHtml(brand.signature.name)}</div>
   <div style="margin-top:4px;">
-    <a href="https://recycleoldtech.com" style="color:#4f46e5; text-decoration:none;">www.recycleoldtech.com</a>
+    <a href="${escapeHtml(brand.signature.siteUrl)}" style="color:#4f46e5; text-decoration:none;">${escapeHtml(brand.signature.siteLabel)}</a>
   </div>
-  <img src="cid:signature-logo" width="300" height="37" alt="RecycleOldTech.com" style="display:block; margin-top:12px; max-width:300px; height:auto; border:0;" />
+  <img src="cid:${escapeHtml(brand.signature.logoCid)}" width="${brand.signature.logoWidth}" height="${brand.signature.logoHeight}" alt="${escapeHtml(brand.signature.siteLabel)}" style="display:block; margin-top:12px; max-width:${brand.signature.logoWidth}px; height:auto; border:0;" />
 </div>`;
 }
 
@@ -141,23 +181,23 @@ function signatureHtml(): string {
  * white-space:pre-wrap which some webmail clients strip, collapsing the
  * message into one line) followed by the branded signature.
  */
-export function buildHtmlBody(draftText: string): string {
+export function buildHtmlBody(draftText: string, brand: BrandProfile = DEFAULT_BRAND): string {
   return `<div style="${FONT_STYLE}">
-${draftToHtml(draftText)}${signatureHtml()}
+${draftToHtml(draftText)}${signatureHtml(brand)}
 </div>`;
 }
 
 /**
  * Nodemailer attachment descriptor for the inline logo. Attach this to
- * the sendMail call so `cid:signature-logo` in the HTML resolves to
- * the embedded image bytes.
+ * the sendMail call so `cid:...` in the HTML resolves to the embedded
+ * image bytes.
  */
-export function signatureAttachment(): SignatureAttachment {
+export function signatureAttachment(brand: BrandProfile = DEFAULT_BRAND): SignatureAttachment {
   return {
-    filename: 'recycleoldtech-logo.png',
-    cid: 'signature-logo',
+    filename: brand.signature.logoFilename,
+    cid: brand.signature.logoCid,
     contentType: 'image/png',
-    content: logoBuffer(),
+    content: logoBuffer(brand.signature.logoPath),
     encoding: 'base64',
   };
 }
