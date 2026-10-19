@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { getBrandEnv, requireBrandEnv } from './env.js';
 import { DOWNTOWNDRY_BRAND } from './downtowndry.js';
+import { EBIKELOCAL_BRAND } from './ebikelocal.js';
 import { ROI_BRAND } from './roi.js';
 import { tryGetBrand, syncKeyFor } from './index.js';
 
@@ -66,5 +67,23 @@ describe('poll brand routing (tryGetBrand + syncKeyFor)', () => {
     expect(syncKeyFor(ROI_BRAND)).toBe('roi:INBOX');
     expect(syncKeyFor(DOWNTOWNDRY_BRAND)).toBe('downtowndry:INBOX');
     expect(syncKeyFor(ROI_BRAND)).not.toBe(syncKeyFor(DOWNTOWNDRY_BRAND));
+  });
+});
+
+describe('eBikeLocal env (EBL_*)', () => {
+  it('resolves EBL_* vars and skips cleanly when one is missing', () => {
+    process.env.EBL_EMAIL_USER = 'hello@ebikelocal.com';
+    process.env.EBL_EMAIL_PASS = 'secret';
+    process.env.EBL_DISCORD_CHANNEL_ID = '1234567890';
+    expect(getBrandEnv(EBIKELOCAL_BRAND)?.emailUser).toBe('hello@ebikelocal.com');
+    delete process.env.EBL_EMAIL_PASS;
+    expect(getBrandEnv(EBIKELOCAL_BRAND)).toBeNull();
+    delete process.env.EBL_EMAIL_USER;
+    delete process.env.EBL_DISCORD_CHANNEL_ID;
+  });
+
+  it('has its own poll cursor key', () => {
+    expect(tryGetBrand('ebikelocal')?.id).toBe('ebikelocal');
+    expect(syncKeyFor(EBIKELOCAL_BRAND)).toBe('ebikelocal:INBOX');
   });
 });
