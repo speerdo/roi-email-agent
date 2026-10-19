@@ -12,6 +12,9 @@
     }
   ],
   "functions": {
-    "api/*.ts": { "maxDuration": 120 }
+    "api/*.ts": {
+      "maxDuration": 120,
+      "includeFiles": "assets/images/**"
+    }
   }
 }
