@@ -4,7 +4,7 @@ import { pgTable, uuid, text, integer, boolean, timestamp, jsonb, index, uniqueI
 // status values: pending | approved | rejected | sent | skipped | error
 //   (plus 'sending' as a transient claim state for Approve idempotency —
 //   see api/discord.ts handleApprove conditional-write guard).
-// brand: which brand profile owns the row ('roi' | 'downtowndry'). Drives
+// brand: which brand profile owns the row ('roi' | 'downtowndry' | 'ebikelocal'). Drives
 //   the SMTP credentials, From name, signature, Discord channel and
 //   prefilter/Gemini config used at approve time (api/discord.ts loads the
 //   row, then getBrand(row.brand)). Default 'roi' covers all pre-existing

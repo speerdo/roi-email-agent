@@ -15,7 +15,7 @@ describe('DowntownDry brand registry', () => {
 
   it('is listed alongside ROI, without changing the default brand', () => {
     const ids = listBrands().map((b) => b.id).sort();
-    expect(ids).toEqual(['downtowndry', 'roi']);
+    expect(ids).toEqual(['downtowndry', 'ebikelocal', 'roi']);
     expect(DEFAULT_BRAND.id).toBe('roi');
   });
 
