@@ -95,7 +95,7 @@ export const newsletterSubscribers = pgTable('newsletter_subscribers', {
 }));
 
 // alert_state — de-duplication state for the Discord error alert, one row
-// per alert key (the poller uses its mailbox key). Cron runs every 10
+// per alert key (the poller uses its mailbox key). Cron runs every 15
 // minutes in a serverless function, so "have I already reported this?"
 // cannot live in process memory; it has to be durable.
 //

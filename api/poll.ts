@@ -29,7 +29,7 @@ import {
 import { getDiscordEnv } from '../types/env.js';
 
 /**
- * Cap on messages fetched per cron tick. Cron fires every 10 minutes (see
+ * Cap on messages fetched per cron tick. Cron fires every 15 minutes (see
  * vercel.json), so a smaller batch just means backlog drains over more
  * ticks rather than risking the function's maxDuration. Live testing
  * during Phase 5 review showed Gemini-bound per-message cost plus IMAP
@@ -88,7 +88,7 @@ function authenticate(req: VercelRequest, res: VercelResponse): boolean {
 }
 
 /**
- * Incremental poll endpoint. Cron-fired (see vercel.json — every 10 min).
+ * Incremental poll endpoint. Cron-fired (see vercel.json — every 15 min).
  *
  * Flow:
  *   1. Authenticate via CRON_SECRET header.
@@ -317,8 +317,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // human actually looks, rather than sitting in Vercel logs nobody
   // watches. Best-effort — a Discord outage here must not fail the poll.
   //
-  // Repeat-suppressed via lib/alerts.ts: cron fires every 10 minutes, so
-  // a sustained failure would otherwise post the same line six times an
+  // Repeat-suppressed via lib/alerts.ts: cron fires every 15 minutes, so
+  // a sustained failure would otherwise post the same line four times an
   // hour until someone muted the channel. A changed condition still posts
   // immediately, and recovery is announced. See lib/alerts.ts.
   // Alerts go to the channel of the brand they came from.

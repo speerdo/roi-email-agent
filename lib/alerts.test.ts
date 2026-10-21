@@ -165,8 +165,8 @@ describe('decideAlert', () => {
     expect(d.action).toBe('remind');
   });
 
-  it('at a 10-minute cron, an hour of outage costs 2 posts instead of 6', () => {
-    // Walks the real cadence: first tick posts, the next five suppress,
+  it('at a 15-minute cron, an hour of outage costs 2 posts instead of 4', () => {
+    // Walks the real cadence: first tick posts, the next three suppress,
     // the tick at +60m reminds.
     type Prior = {
       fingerprint: string;
@@ -194,8 +194,8 @@ describe('decideAlert', () => {
     let prior: Prior | null = null;
     const actions: string[] = [];
 
-    for (let tick = 0; tick <= 6; tick++) {
-      const at = new Date(start.getTime() + tick * 10 * 60_000);
+    for (let tick = 0; tick <= 4; tick++) {
+      const at = new Date(start.getTime() + tick * 15 * 60_000);
       const d = decideAlert({ fingerprint: fp, prior, now: at });
       actions.push(d.action);
       const occurrences = d.action === 'none' || d.action === 'recovered' ? 1 : d.occurrences;
@@ -208,11 +208,9 @@ describe('decideAlert', () => {
       'suppress',
       'suppress',
       'suppress',
-      'suppress',
-      'suppress',
       'remind',
     ]);
-    expect(prior?.occurrences).toBe(7);
+    expect(prior?.occurrences).toBe(5);
   });
 });
 
