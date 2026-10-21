@@ -2,9 +2,9 @@
 //
 // Repeat-suppression for the Discord error alert (api/poll.ts).
 //
-// The poller runs every 10 minutes. Before this module, any sustained
-// failure meant six identical Discord posts an hour for as long as it
-// lasted — during the 2026-08-13 PrivateEmail outage that was ~20 posts
+// The poller runs every 15 minutes. Before this module, any sustained
+// failure meant four identical Discord posts an hour (six at the old
+// 10-minute cadence) for as long as it lasted — during the 2026-08-13 PrivateEmail outage that was ~20 posts
 // saying nothing new, which is how an alert channel becomes noise people
 // mute. The rule here: post the first occurrence immediately, then stay
 // quiet until the reminder interval elapses, then post a reminder that
@@ -28,8 +28,8 @@ import type { RunSummary } from './logging.js';
 
 /**
  * How long an unchanged failure stays quiet between reminders. One hour
- * against a 10-minute cron means a sustained outage costs 1 post/hour
- * instead of 6, while still proving the condition is live.
+ * against a 15-minute cron means a sustained outage costs 1 post/hour
+ * instead of 4, while still proving the condition is live.
  */
 export const REMINDER_INTERVAL_MS = 60 * 60 * 1000;
 

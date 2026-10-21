@@ -2,9 +2,9 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": true,
   "crons": [
-    { "path": "/api/poll", "schedule": "*/10 * * * *" },
-    { "path": "/api/poll/downtowndry", "schedule": "5-59/10 * * * *" },
-    { "path": "/api/poll/ebikelocal", "schedule": "7-59/10 * * * *" }
+    { "path": "/api/poll", "schedule": "*/15 * * * *" },
+    { "path": "/api/poll/downtowndry", "schedule": "*/15 * * * *" },
+    { "path": "/api/poll/ebikelocal", "schedule": "*/15 * * * *" }
   ],
   "rewrites": [
     {

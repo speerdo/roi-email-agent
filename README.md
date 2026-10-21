@@ -11,7 +11,7 @@ Build roadmap: [`docs/ACTION_PLAN.md`](docs/ACTION_PLAN.md).
 ## Architecture
 
 ```
-PrivateEmail (IMAP) -> /api/poll (Vercel cron, every 10 min)
+PrivateEmail (IMAP) -> /api/poll (Vercel cron, every 15 min)
   -> deterministic pre-filters (recycling-form, newsletter, DMARC)
      -> match: mark \Seen, status=skipped, no LLM, no card
   -> Gemini classify + draft
@@ -121,9 +121,9 @@ confirm the PING returns PONG.
 Once deployed to production:
 
 - **Cron:** registered in `vercel.json` — `/api/poll` (ROI) at
-  `*/10 * * * *` , `/api/poll/downtowndry` at `5-59/10 * * * *`
-  and `/api/poll/ebikelocal` at `7-59/10 * * * *`
-  (offset so the brands never tick at the same minute-second; the
+  `*/15 * * * *` , `/api/poll/downtowndry` and `/api/poll/ebikelocal`
+  at the same schedule (all three fire together so the Neon database
+  wakes once per 15 min and can suspend in between; the
   path-segment rewrite maps it to `/api/poll?brand=<id>` — cron
   paths stay plain, `?brand=` remains supported in the handler).
   Confirmed in the Vercel dashboard → Cron Jobs tab (Vercel Pro required
@@ -151,10 +151,9 @@ Once deployed to production:
 
 ## Cron
 
-`vercel.json` defines three crons: `*/10 * * * *` hitting `/api/poll` (the
-ROI brand, the default when `?brand=` is absent), `5-59/10 * * * *`
-hitting `/api/poll/downtowndry` and `7-59/10 * * * *` hitting
-`/api/poll/ebikelocal` (rewritten to
+`vercel.json` defines three crons, all at `*/15 * * * *`: `/api/poll` (the
+ROI brand, the default when `?brand=` is absent),
+`/api/poll/downtowndry` and `/api/poll/ebikelocal` (rewritten to
 `/api/poll?brand=<id>`; cron paths are plain path segments, while
 the handler keeps direct `?brand=` support). The endpoint authorizes via
 the `Authorization: Bearer $CRON_SECRET` header (header-only; the secret
@@ -199,7 +198,7 @@ This project targets **Vercel Pro** (sub-hourly cron + 60s
 `maxDuration`). If forking to Vercel Hobby (which allows 1 cron job at
 daily minimum only), remove the `crons` block from `vercel.json` and
 drive the endpoint from an external scheduler (cron-job.org, GitHub
-Actions, etc.) hitting the secret-guarded URL every 10 minutes, and drop
+Actions, etc.) hitting the secret-guarded URL every 15 minutes, and drop
 `maxDuration` to the Hobby ceiling.
 
 ## Layout
