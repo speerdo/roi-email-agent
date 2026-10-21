@@ -3,8 +3,8 @@
 // Repeat-suppression for the Discord error alert (api/poll.ts).
 //
 // The poller runs every 15 minutes. Before this module, any sustained
-// failure meant four identical Discord posts an hour (six at the old 10-minute cadence) for as long as it
-// lasted — during the 2026-08-13 PrivateEmail outage that was ~20 posts
+// failure meant four identical Discord posts an hour (six at the old
+// 10-minute cadence) for as long as it lasted — during the 2026-08-13 PrivateEmail outage that was ~20 posts
 // saying nothing new, which is how an alert channel becomes noise people
 // mute. The rule here: post the first occurrence immediately, then stay
 // quiet until the reminder interval elapses, then post a reminder that
