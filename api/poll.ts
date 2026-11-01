@@ -13,6 +13,7 @@ import {
   finish,
   type CardPoster,
 } from '../lib/poll/runner.js';
+import { readCursor, writeCursor, fetchMailboxStatus, canSkipPoll } from '../lib/poll/cursor.js';
 import { postCard } from '../lib/discord/rest.js';
 import { getBrand, tryGetBrand, syncKeyFor } from '../lib/brands/index.js';
 import { getBrandEnv } from '../lib/brands/env.js';
@@ -146,6 +147,27 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const key = mailboxKey(brand);
   const startedAt = new Date();
 
+  // 0. Idle shortcut: with a cached cursor, one IMAP STATUS tells us whether
+  // anything exists above it. If not, finish without touching Neon so the
+  // database can suspend. Any doubt (cache miss, STATUS failure, UIDVALIDITY
+  // change, open alert) falls through to the full path below.
+  const cachedCursor = await readCursor(key);
+  if (cachedCursor) {
+    try {
+      const status = await fetchMailboxStatus(mailbox, {
+        user: brandEnv.emailUser,
+        pass: brandEnv.emailPass,
+      });
+      if (canSkipPoll(cachedCursor, status)) {
+        console.log(`[poll] ${key} idle (uidNext ${status.uidNext}, cursor ${cachedCursor.lastUid}) — no Neon access`);
+        res.status(200).json({ brand: brand.id, status: 'idle', lastUid: cachedCursor.lastUid });
+        return;
+      }
+    } catch (err) {
+      console.warn(`[poll] idle pre-check failed, running full poll: ${(err as Error).message}`);
+    }
+  }
+
   // 1. Sync state.
   let lastUidBefore: number;
   try {
@@ -199,6 +221,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // already-persisted progress and leave last_uid stuck, forcing every
   // later run to re-walk the same already-handled messages via dedupe.
   let seenUids: number[] = [];
+  let uidValidity: number | null = null;
   try {
     // Poll the OWNING brand's mailbox: same host/port, brand credentials.
     await withImap(async (client) => {
@@ -220,6 +243,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       try {
         const lock = await client.getMailboxLock(mailbox, { readOnly: true, acquireTimeout: 15_000 });
         try {
+          const mb = client.mailbox;
+          if (mb && typeof mb === 'object' && mb.uidValidity !== undefined) {
+            uidValidity = Number(mb.uidValidity);
+          }
           const skipped = await client.search(
             { uid: `${lastUidBefore + 1}:*`, before: cutoffDate() },
             { uid: true },
@@ -323,6 +350,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // immediately, and recovery is announced. See lib/alerts.ts.
   // Alerts go to the channel of the brand they came from.
   await postAlert(summary, key, brandEnv.discordChannelId);
+
+  // Remember where we got to so the next idle poll can skip Neon. Only when
+  // the cursor is known to be durable (saved, or unchanged) and UIDVALIDITY
+  // was observed; otherwise leave the old entry to expire / be rewritten.
+  if (uidValidity !== null) {
+    await writeCursor(key, {
+      lastUid: summary.lastUidAfter,
+      uidValidity,
+      alertActive: fingerprintRun(summary) !== null,
+    });
+  }
 
   // Always 200 with the summary; a 500 would make Vercel's cron retry logic
   // fire and we don't want that for partial-success runs. Real catastrophic
