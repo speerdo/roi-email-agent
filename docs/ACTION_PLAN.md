@@ -718,7 +718,7 @@ Tasks:
       Phase 4 `test-gemini.ts` cases with the flash-lite classify to
       confirm accuracy didn't regress (especially: listing requests
       still classify as `should_reply=true`).
-- [ ] **Sent folder mirror:** implement `appendSent()` in `lib/imap.ts`
+- [x] **Sent folder mirror:** implement `appendSent()` in `lib/imap.ts`
       — append the sent raw message to the IMAP `Sent` folder via
       `imapflow`'s `append` operation so outbound replies show in
       webmail. **Confirmed in Phase 0 preflight**: the folder is named

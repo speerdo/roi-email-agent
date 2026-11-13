@@ -145,10 +145,13 @@ export function connectImap(auth?: ImapAuth): ImapFlow {
  * performs side effects (row inserts, Discord card posts, \\Seen flagging)
  * that are not idempotent, so retrying it could double-post.
  */
-async function connectWithRetry(auth?: ImapAuth): Promise<ImapFlow> {
+async function connectWithRetry(
+  auth?: ImapAuth,
+  attempts: number = CONNECT_ATTEMPTS,
+): Promise<ImapFlow> {
   let lastErr: Error | undefined;
 
-  for (let attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     const client = connectImap(auth);
     let timer: NodeJS.Timeout | undefined;
     try {
@@ -162,7 +165,7 @@ async function connectWithRetry(auth?: ImapAuth): Promise<ImapFlow> {
         }),
       ]);
       if (attempt > 1) {
-        console.warn(`[imap] connect succeeded on attempt ${attempt}/${CONNECT_ATTEMPTS}`);
+        console.warn(`[imap] connect succeeded on attempt ${attempt}/${attempts}`);
       }
       return client;
     } catch (err) {
@@ -175,10 +178,10 @@ async function connectWithRetry(auth?: ImapAuth): Promise<ImapFlow> {
       } catch {
         /* already dead */
       }
-      if (attempt === CONNECT_ATTEMPTS) break;
+      if (attempt === attempts) break;
       const delay = CONNECT_RETRY_BASE_MS * 2 ** (attempt - 1);
       console.warn(
-        `[imap] connect attempt ${attempt}/${CONNECT_ATTEMPTS} failed (${lastErr.message}); retrying in ${delay}ms`,
+        `[imap] connect attempt ${attempt}/${attempts} failed (${lastErr.message}); retrying in ${delay}ms`,
       );
       await sleep(delay);
     } finally {
@@ -187,7 +190,7 @@ async function connectWithRetry(auth?: ImapAuth): Promise<ImapFlow> {
   }
 
   throw new Error(
-    `imap connect failed after ${CONNECT_ATTEMPTS} attempts: ${lastErr?.message ?? 'unknown error'}`,
+    `imap connect failed after ${attempts} attempts: ${lastErr?.message ?? 'unknown error'}`,
   );
 }
 
@@ -199,8 +202,9 @@ async function connectWithRetry(auth?: ImapAuth): Promise<ImapFlow> {
 export async function withImap<T>(
   fn: (client: ImapFlow) => Promise<T>,
   auth?: ImapAuth,
+  opts?: { connectAttempts?: number },
 ): Promise<T> {
-  const client = await connectWithRetry(auth);
+  const client = await connectWithRetry(auth, opts?.connectAttempts);
   try {
     return await fn(client);
   } finally {
@@ -503,12 +507,87 @@ export async function markSeenBatch(
   }
 }
 
+// ---- Sent folder ----------------------------------------------------------
+
 /**
- * Append a sent message to the IMAP Sent folder. Phase 9 implementation;
- * for now logs and returns so Phase 4's SMTP path can call it without
- * branching. Confirmed in preflight: the folder is named `Sent` on
- * PrivateEmail (not `Sent Items`).
+ * Fallback Sent-folder names, tried in order (case-insensitive, whole path)
+ * only when the server advertises no mailbox with the `\\Sent` special-use
+ * flag. PrivateEmail (all three brands) is expected to use the special-use
+ * flag on `Sent`; the rest cover other hosts.
  */
-export async function appendSent(_rawMessage: string | Buffer): Promise<void> {
-  console.log('[imap] appendSent: not implemented (phase-9 stub)');
+export const SENT_FOLDER_FALLBACKS = ['Sent', 'INBOX.Sent', 'Sent Items', 'Sent Messages'] as const;
+
+/** Whole-operation ceiling for appendSent (connect + LIST + APPEND). */
+const APPEND_SENT_TIMEOUT_MS = 20_000;
+
+/** appendSent connects once and retries once, not the poller's 3 attempts. */
+const APPEND_SENT_CONNECT_ATTEMPTS = 2;
+
+/**
+ * Pick the mailbox path to use as the Sent folder, or null if there is none.
+ * Prefers the `\\Sent` special-use flag; falls back to common names. Never
+ * creates a folder.
+ */
+export async function findSentFolder(client: ImapFlow): Promise<string | null> {
+  const boxes = await client.list();
+  const special = boxes.find((b) => b.specialUse === '\\Sent');
+  if (special) return special.path;
+  for (const name of SENT_FOLDER_FALLBACKS) {
+    const hit = boxes.find((b) => b.path.toLowerCase() === name.toLowerCase());
+    if (hit) return hit.path;
+  }
+  return null;
+}
+
+/**
+ * Append a sent message (the exact raw MIME bytes that went out over SMTP)
+ * to the mailbox's Sent folder with the `\\Seen` flag, using that brand's
+ * own credentials (`auth`).
+ *
+ * Returns true when appended, false when the mailbox has no Sent folder
+ * (logged and skipped; we never create folders). THROWS on connection,
+ * LIST or APPEND failures and on timeout: the caller (sendReply) treats
+ * every failure as non-fatal because the email has already gone out.
+ *
+ * Uses one short connection: the connect handshake is retried once (not
+ * the poller's three attempts) and the whole operation is bounded by
+ * APPEND_SENT_TIMEOUT_MS so it cannot eat the serverless budget.
+ */
+export async function appendSent(rawMessage: Buffer, auth: ImapAuth): Promise<boolean> {
+  return withImap(
+    async (client) => {
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          // Closing the socket makes any in-flight command reject too.
+          try {
+            client.close();
+          } catch {
+            /* already dead */
+          }
+          reject(new Error(`appendSent exceeded ${APPEND_SENT_TIMEOUT_MS}ms`));
+        }, APPEND_SENT_TIMEOUT_MS);
+      });
+      const work = (async () => {
+        const folder = await findSentFolder(client);
+        if (!folder) {
+          console.warn(`[imap] appendSent: no Sent folder for ${auth.user}; skipping`);
+          return false;
+        }
+        const res = await client.append(folder, rawMessage, ['\\Seen']);
+        if (!res) throw new Error(`APPEND to "${folder}" was rejected by the server`);
+        return true;
+      })();
+      // If the timeout wins, `work` may still reject later; don't leave
+      // that as an unhandled rejection.
+      work.catch(() => {});
+      try {
+        return await Promise.race([work, timeout]);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+    auth,
+    { connectAttempts: APPEND_SENT_CONNECT_ATTEMPTS },
+  );
 }

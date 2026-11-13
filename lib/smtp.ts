@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import nodemailer from 'nodemailer';
+import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import type { Transporter } from 'nodemailer';
 import { getEnv } from './env.js';
 import { appendSent } from './imap.js';
@@ -41,6 +43,9 @@ export interface SendReplyInput {
 
 export interface SendReplyResult {
   messageId: string | undefined;
+  /** True only when the sent message was actually appended to the brand's
+   *  IMAP Sent folder. False when the append was skipped (no Sent folder)
+   *  or failed; either way the email itself HAS been sent. */
   appendedToSent: boolean;
 }
 
@@ -76,10 +81,12 @@ function getTransport(brand: BrandProfile): Transporter {
  * here from the row-shaped input rather than trusting callers, so a
  * future caller can't accidentally pass the wrong header.
  *
- * After a successful send, attempts to append the sent raw message to the
- * IMAP `Sent` folder (Phase 9 nice-to-have; currently a stub that logs
- * "not implemented"). The append failure is non-fatal — the email was
- * already sent, so we return `appendedToSent: false` and continue.
+ * The raw MIME is built once (MailComposer, with an explicit Message-ID),
+ * sent as-is via the transport, and the SAME bytes are then appended to
+ * the brand's IMAP Sent folder with `\\Seen`, so the sent copy and the
+ * saved copy are byte-identical. The append is non-fatal — the email was
+ * already sent, so any failure (or a mailbox with no Sent folder) is
+ * logged and reported as `appendedToSent: false`, never thrown.
  */
 export async function sendReply(input: SendReplyInput): Promise<SendReplyResult> {
   const brand = input.brand;
@@ -112,36 +119,48 @@ export async function sendReply(input: SendReplyInput): Promise<SendReplyResult>
   const html = buildHtmlBody(body, brand);
   const attachments = [signatureAttachment(brand)];
 
-  const info = await transport.sendMail({
+  // Explicit Message-ID so the SMTP copy and the Sent copy share it. The
+  // domain is the sending mailbox's, so it looks like any other message
+  // from that mailbox.
+  const domain = brandEnv.emailUser.split('@')[1] ?? 'localhost';
+  const messageId = `<${randomUUID()}@${domain}>`;
+
+  // Build the raw MIME ONCE; these exact bytes go out over SMTP and into
+  // the Sent folder.
+  const raw = await new MailComposer({
     from,
     to: input.to,
     subject,
     text,
     html,
     attachments,
+    messageId,
     // nodemailer types reject null; only pass the headers when non-null.
     ...(inReplyTo ? { inReplyTo } : {}),
     ...(references ? { references } : {}),
+  })
+    .compile()
+    .build();
+
+  // With `raw`, nodemailer does not derive the SMTP envelope from the
+  // headers, so it is passed explicitly (bare addresses, not display form).
+  await transport.sendMail({
+    envelope: { from: brandEnv.emailUser, to: [input.to] },
+    raw,
   });
 
-  // Best-effort mirror to IMAP Sent folder. Phase 9 will implement
-  // appendSent() for real; until then it's a no-op that logs.
+  // Best-effort mirror to the brand's IMAP Sent folder (its own
+  // credentials). Never throws past here: the email is already out.
   let appendedToSent = false;
   try {
-    await appendSent(info.messageId ?? '');
-    // Once Phase 9 implements appendSent, the call above actually appends.
-    // For now it always logs "not implemented" and returns, so we report
-    // false here — the truth is "no append happened."
-    appendedToSent = false;
+    appendedToSent = await appendSent(raw, {
+      user: brandEnv.emailUser,
+      pass: brandEnv.emailPass,
+    });
   } catch (err) {
-    // Non-fatal: the email already sent. Log and continue.
     const e = err as Error;
     console.warn(`[smtp] appendSent failed (email already sent, continuing): ${e.message}`);
-    appendedToSent = false;
   }
 
-  return {
-    messageId: typeof info.messageId === 'string' ? info.messageId : undefined,
-    appendedToSent,
-  };
+  return { messageId, appendedToSent };
 }
