@@ -112,4 +112,15 @@ describe('poll idle shortcut', () => {
     await call();
     expect(h.loadSyncState).toHaveBeenCalled();
   });
+
+  it('IMAP connect failure → cached cursor marked alertActive so the next tick announces recovery', async () => {
+    h.status = new Error('imap down');
+    h.withImap.mockRejectedValue(new Error('imap connect failed after 3 attempts: Command failed'));
+    await call();
+    expect(h.writeCursor).toHaveBeenCalledWith(expect.any(String), {
+      lastUid: 100,
+      uidValidity: 7,
+      alertActive: true,
+    });
+  });
 });

@@ -354,12 +354,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Remember where we got to so the next idle poll can skip Neon. Only when
   // the cursor is known to be durable (saved, or unchanged) and UIDVALIDITY
   // was observed; otherwise leave the old entry to expire / be rewritten.
+  const alertActive = fingerprintRun(summary) !== null;
   if (uidValidity !== null) {
     await writeCursor(key, {
       lastUid: summary.lastUidAfter,
       uidValidity,
-      alertActive: fingerprintRun(summary) !== null,
+      alertActive,
     });
+  } else if (alertActive && cachedCursor && !cachedCursor.alertActive) {
+    // The run failed before the mailbox opened (e.g. IMAP connect failed),
+    // so there is no fresh UIDVALIDITY to write. Still mark the old entry's
+    // alert as open: otherwise the next tick, with IMAP back, takes the idle
+    // shortcut and the recovery message waits for new mail or the cache TTL
+    // (seen live: "recovered ... over 5h 59m" on 2026-11-12, ebikelocal).
+    await writeCursor(key, { ...cachedCursor, alertActive: true });
   }
 
   // Always 200 with the summary; a 500 would make Vercel's cron retry logic
